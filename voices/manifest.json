@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "voices": {
+    "Arthur.wav": {"language": "en", "style": "agentic"},
+    "Clara.wav": {"language": "en", "style": "agentic"},
+    "Frederick.wav": {"language": "en", "style": "audiobook"},
+    "Henry.wav": {"language": "en", "style": "agentic"},
+    "John.wav": {"language": "en", "style": "agentic"},
+    "Josie.wav": {"language": "en", "style": "agentic"},
+    "Julian.wav": {"language": "en", "style": "agentic"},
+    "Juri.wav": {"language": "de", "style": "audiobook"},
+    "Lucas.wav": {"language": "en", "style": "agentic"},
+    "Miles.wav": {"language": "en", "style": "audiobook"},
+    "Nora.wav": {"language": "en", "style": "agentic"},
+    "Oskar.wav": {"language": "de", "style": "audiobook"},
+    "Riley.wav": {"language": "en", "style": "conversational"},
+    "Sofia.wav": {"language": "de", "style": "agentic"},
+    "Vivian.wav": {"language": "en", "style": "agentic"}
+  }
+}

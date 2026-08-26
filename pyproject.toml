@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tontaube-inference"
+version = "1.0.0"
+description = "vLLM inference server for Tontaube text-to-speech"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dynamic = ["dependencies"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "VibeVoice/LICENSE", "voices/LICENSE"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<2",
+]
+
+[project.entry-points."vllm.general_plugins"]
+tontaube = "app.model.vllm_plugin:register"
+
+[project.scripts]
+tontaube = "app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["app*", "VibeVoice*", "voices*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+app = ["ui/*.html", "ui/*.css", "ui/*.js", "ui/*.png"]
+voices = [
+    "LICENSE",
+    "README.md",
+    "manifest.json",
+    "samples/*.aac",
+    "samples/*.flac",
+    "samples/*.m4a",
+    "samples/*.mp3",
+    "samples/*.ogg",
+    "samples/*.opus",
+    "samples/*.wav",
+]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.uv]
+constraint-dependencies = [
+    "grpcio-reflection==1.81.1",
+]
+override-dependencies = [
+    "protobuf>=6.33.5,<7",
+]

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>TontaubeV1 Studio</title>
+  <link rel="stylesheet" href="/ui/assets/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="TontaubeV1 Studio home">
+        <img class="brand-logo" src="/ui/assets/tontaube-logo.png" alt="">
+        <span><strong>TontaubeV1</strong><small>Local speech studio</small></span>
+      </a>
+      <div class="connection"><span id="connection-dot" class="status-dot"></span><span id="connection-label">Not checked</span></div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <h1>Text to speech</h1>
+        <p>Generate locally, clone a permitted voice, and tune the model without leaving your browser.</p>
+      </section>
+
+      <form id="tts-form" novalidate>
+        <div class="workspace">
+          <section class="card composer" aria-labelledby="script-title">
+            <div class="section-heading">
+              <div><span class="step">01</span><h2 id="script-title">Script</h2></div>
+              <span id="char-count" class="quiet">0 characters</span>
+            </div>
+            <label class="sr-only" for="text">Text to speak</label>
+            <textarea id="text" maxlength="40000" required placeholder="Write or paste the text you want Tontaube to speak…">In my younger and more vulnerable years my father gave me some advice that I've been turning over in my mind ever since. &quot;Whenever you feel like criticizing anyone,&quot; he told me, &quot;just remember that all the people in this world haven't had the advantages that you've had.&quot; He didn’t say any more, but we’ve always been unusually communicative in a reserved way, and I understood that he meant a great deal more than that.</textarea>
+            <div class="field-grid three">
+              <label>Language
+                <select id="language">
+                  <option value="english">English</option><option value="german">German</option>
+                  <option value="spanish">Spanish</option><option value="french">French</option>
+                  <option value="italian">Italian</option><option value="dutch">Dutch</option>
+                  <option value="portuguese">Portuguese</option>
+                </select>
+              </label>
+              <label>Speaking style
+                <select id="tag">
+                  <option value="conversational">Conversational</option><option value="audiobook">Audiobook</option>
+                  <option value="agentic">Agentic</option>
+                </select>
+              </label>
+              <label>Temperature
+                <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.8" required>
+              </label>
+            </div>
+            <p class="hint temperature-hint">0.6 favors correctness; values near 1.0 can sound more natural and expressive.</p>
+          </section>
+
+          <aside class="card server-card" aria-labelledby="server-title">
+            <div class="section-heading compact"><div><span class="step">Server</span><h2 id="server-title">Connection</h2></div></div>
+            <label>Server URL<input id="server-url" type="url" inputmode="url" spellcheck="false" value="http://127.0.0.1:8080"></label>
+            <label>API key <span class="optional">optional</span><input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Not required by default"></label>
+            <button id="check-server" class="secondary" type="button">Check connection</button>
+            <p class="hint">The local inference server normally runs on port 8080. Replace this URL to use a remote server.</p>
+          </aside>
+
+          <section class="card voice-card" aria-labelledby="voice-title">
+            <div class="section-heading">
+              <div><span class="step">02</span><h2 id="voice-title">Voice</h2></div>
+              <button id="refresh-voices" class="secondary compact-button" type="button">↻ Refresh voices</button>
+            </div>
+            <div class="field-grid two compact-fields voice-selection">
+              <label>Sample voice
+                <span class="voice-select-control">
+                  <select id="voice-select"><option value="">Loading voices…</option></select>
+                  <span id="voice-style-badge" class="voice-style-badge" hidden><small>Style</small><strong></strong></span>
+                </span>
+              </label>
+              <label>Prompt token cap<input id="prompt-max-tokens" type="number" min="1" max="750" step="1" value="750"></label>
+            </div>
+            <p class="hint voice-hint">Sample voices are read from the UI's local voice folder and uploaded with each request. Uploading a reference below overrides the selected sample.</p>
+            <div id="voice-upload" class="upload-zone">
+              <input id="voice-file" type="file" accept="audio/*,.wav,.mp3,.opus,.ogg,.m4a,.aac,.flac">
+              <label for="voice-file"><span class="upload-icon">↑</span><strong>Choose a voice reference</strong><span>Clean, single-speaker audio · up to 60 seconds</span></label>
+              <div id="voice-file-meta" class="file-meta" hidden><span id="voice-file-name"></span><button id="clear-voice" type="button" class="text-button">Remove</button></div>
+              <audio id="voice-preview" controls hidden></audio>
+            </div>
+            <div class="field-grid two compact-fields">
+              <label>Seed <span class="optional">optional</span><span class="input-action"><input id="seed" type="number" min="0" step="1" placeholder="Random"><button id="random-seed" class="icon-button" type="button" aria-label="Choose a random seed">↻</button></span></label>
+            </div>
+          </section>
+
+          <section class="card output-settings" aria-labelledby="output-title">
+            <div class="section-heading compact"><div><span class="step">03</span><h2 id="output-title">Output</h2></div></div>
+            <div class="segmented" role="radiogroup" aria-label="Response mode">
+              <label><input type="radio" name="transport" value="batch" checked><span>Complete file</span></label>
+              <label><input type="radio" name="transport" value="stream"><span>MP3 stream</span></label>
+            </div>
+            <div class="field-grid two compact-fields">
+              <label>Format<select id="format"><option value="wav">WAV</option><option value="mp3">MP3</option><option value="opus">Opus</option></select></label>
+              <label>Bitrate<select id="bitrate"><option value="32k">32 kbps</option><option value="64k" selected>64 kbps</option><option value="96k">96 kbps</option><option value="128k">128 kbps</option></select></label>
+            </div>
+          </section>
+        </div>
+
+        <details class="card advanced">
+          <summary><span><strong>Advanced controls</strong><small>Sampling, context, and server-side options</small></span><span class="chevron">⌄</span></summary>
+          <div class="advanced-body">
+            <div class="field-grid four">
+              <label>Top p <span class="optional">server default</span><input id="top-p" type="number" min="0.001" max="1" step="0.01" placeholder="0.95"></label>
+              <label>Top k <span class="optional">server default</span><input id="top-k" type="number" min="-1" step="1" placeholder="50"></label>
+              <label>Frequency penalty<input id="frequency-penalty" type="number" min="-2" max="2" step="0.1" placeholder="0"></label>
+              <label>Silence bias<input id="silence-logit-bias" type="number" min="-10" max="10" step="0.1" placeholder="Server default"></label>
+              <label>Acoustic temperature<input id="acoustic-temperature" type="number" min="0" max="2" step="0.05" placeholder="Server default"></label>
+              <label>Acoustic top k<input id="acoustic-top-k" type="number" min="-1" step="1" placeholder="Server default"></label>
+              <label>Maximum new tokens<input id="max-new-tokens" type="number" min="50" max="400" step="1" placeholder="400"></label>
+              <label>Initial stream buffer <span class="optional">seconds</span><input id="streaming-initial-seconds" type="number" min="0.4" max="6" step="0.4" value="2.8"></label>
+              <label>Request priority<select id="priority"><option value="low">Low</option><option value="high">High</option></select></label>
+              <label>vLLM priority <span class="optional">complete file only</span><input id="vllm-priority" type="number" step="1" placeholder="Unset"></label>
+              <label>VibeVoice processing<select id="vibevoice-postprocess"><option value="">Server default</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+              <label class="checkbox-field"><input id="use-verbalization" type="checkbox"><span><strong>English verbalization</strong><small>Requires the optional server model</small></span></label>
+            </div>
+            <label>Prefix text <span class="optional">optional, up to 350 characters</span><textarea id="prefix-text" class="small-textarea" maxlength="350" placeholder="Text spoken immediately before this request"></textarea></label>
+            <details class="developer-fields">
+              <summary>Precomputed prompts and server paths</summary>
+              <div class="field-grid two">
+                <label>Server-side voice path<input id="voice-path" type="text" spellcheck="false" placeholder="/absolute/path/on/server.wav"></label><span></span>
+                <label>Voice tokens <span class="optional">JSON rows</span><textarea id="voice-tokens" class="code-input" spellcheck="false" placeholder="[[1, 2], [3, 4]]"></textarea></label>
+                <label>Prefix tokens <span class="optional">JSON rows</span><textarea id="prefix-tokens" class="code-input" spellcheck="false" placeholder="[[1, 2], [3, 4]]"></textarea></label>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <section class="action-row">
+          <div id="status" class="request-status" role="status" aria-live="polite"><span class="status-dot ready"></span><span>Ready to generate</span></div>
+          <button id="generate" class="primary" type="submit"><span class="button-label">Generate speech</span><span class="spinner"></span></button>
+        </section>
+      </form>
+
+      <section id="result" class="card result" aria-labelledby="result-title" hidden>
+        <div class="section-heading"><div><span class="step">Result</span><h2 id="result-title">Your audio</h2></div><a id="download" class="secondary download" href="#" download>Download</a></div>
+        <audio id="audio-player" controls preload="metadata"></audio><div id="result-meta" class="result-meta"></div>
+      </section>
+    </main>
+    <footer><span>TontaubeV1</span><a id="api-docs" href="http://127.0.0.1:8080/docs" target="_blank" rel="noreferrer">API documentation ↗</a></footer>
+  </div>
+  <script src="/ui/assets/app.js" defer></script>
+</body>
+</html>

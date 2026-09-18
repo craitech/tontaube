@@ -33,7 +33,7 @@ DEFAULT_TAG = os.getenv("DEFAULT_TAG", "audiobook")
 # used by the TontaubeV1 input scheme.
 SUPPORTED_TAGS: tuple[str, ...] = SUPPORTED_VOICE_STYLES
 BUNDLED_VOICE_PATH = REPOSITORY_ROOT / "voices"
-DEFAULT_BUNDLED_VOICE = "Miles.wav"
+DEFAULT_BUNDLED_VOICE = "Marcus.mp3"
 
 
 def normalize_language(language: str) -> str:

@@ -74,22 +74,26 @@ def test_standalone_ui_routes_reference_packaged_files():
 def test_ui_voice_catalog_uses_local_files_without_exposing_paths(tmp_path, monkeypatch):
     samples = tmp_path / "samples"
     samples.mkdir()
-    (samples / "Amber.wav").write_bytes(b"wav")
+    (samples / "Amber.mp3").write_bytes(b"mp3")
     (samples / "cedar.FLAC").write_bytes(b"flac")
     (samples / "Sofia.wav").write_bytes(b"wav")
     (tmp_path / "manifest.json").write_text(
         '{"version":1,"voices":{'
-        '"Amber.wav":{"language":"en","style":"audiobook"},'
+        '"Amber.mp3":{"language":"en","style":"audiobook"},'
         '"Sofia.wav":{"language":"de","style":"audiobook"}'
         '}}',
         encoding="utf-8",
     )
     (tmp_path / "notes.txt").write_text("not audio", encoding="utf-8")
+    (samples / "tokens.json").write_text('[[1], [2], [3]]')
+    outside = tmp_path / "outside.mp3"
+    outside.write_bytes(b"mp3")
+    (samples / "escape.mp3").symlink_to(outside)
     (tmp_path / "nested").mkdir()
     monkeypatch.setenv("TTS_UI_VOICE_PATH", str(tmp_path))
 
     assert available_ui_voices("english") == [
-        {"name": "Amber", "url": "/ui/voice-files/Amber.wav", "style": "audiobook"},
+        {"name": "Amber", "url": "/ui/voice-files/Amber.mp3", "style": "audiobook"},
         {"name": "cedar", "url": "/ui/voice-files/cedar.FLAC"},
     ]
     assert available_ui_voices("de") == [
@@ -100,7 +104,10 @@ def test_ui_voice_catalog_uses_local_files_without_exposing_paths(tmp_path, monk
         {"name": "cedar", "url": "/ui/voice-files/cedar.FLAC"},
     ]
     assert resolve_ui_voice_file("Sofia.wav") == (samples / "Sofia.wav")
-    assert resolve_ui_voice_file("../Amber.wav") is None
+    assert resolve_ui_voice_file("Amber.mp3") == (samples / "Amber.mp3")
+    assert resolve_ui_voice_file("../Amber.mp3") is None
+    assert resolve_ui_voice_file("tokens.json") is None
+    assert resolve_ui_voice_file("escape.mp3") is None
     with pytest.raises(ValueError):
         available_ui_voices("unknown")
 

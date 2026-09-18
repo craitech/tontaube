@@ -39,7 +39,7 @@ finishes. Check readiness from another terminal with:
 curl --fail http://127.0.0.1:8080/readyz
 ```
 
-Generate a WAV with the bundled Miles voice from another terminal:
+Generate a WAV with the bundled Marcus voice from another terminal:
 
 ```bash
 curl --silent --show-error --fail http://127.0.0.1:8080/predict \
@@ -87,7 +87,7 @@ environment. A remote API must allow the UI's exact origin through
 The UI supports bundled voice selection, local voice-reference uploads,
 sampling and acoustic controls, WAV/MP3/Opus responses, MP3 streaming, instant
 playback, and downloads. It reads its own `voices/` directory and uploads the
-selected WAV with each request, so a remote inference server does not need the
+selected audio file with each request, so a remote inference server does not need the
 sample files. References live together in `voices/samples/`; optional language
 and style metadata in `voices/manifest.json` controls language filtering and
 groups the voice menu by style. Voices without a declared language appear for
@@ -400,10 +400,16 @@ For voice cloning, provide one of:
 - `voice_tokens`: precomputed semantic and acoustic prompt-token rows
 - `voice_path`: an audio path inside the inference server's configured `VOICE_PATH`
 
-When no voice source is supplied, the server uses the bundled Miles reference.
+When no voice source is supplied, the server uses the bundled Marcus reference.
 `prompt_max_tokens` can cap CB0 at 1--750 voice-prompt tokens; the later
 codebooks apply their own smaller caps. Reference audio should contain clean
 speech from one speaker.
+
+The bundled catalogue includes 39 standard voices as MP3 references across all
+seven languages, plus seven legacy audio voices. Marcus is the default.
+Select a voice in the UI, or use `"voice_path": "samples/Marcus.mp3"` with
+the default bundled voice directory. Add your own audio files to
+`voices/samples/`; see [voice catalogue metadata](voices/README.md).
 
 Audio is synthesized at 24 kHz. By default, non-streaming `/predict` requests
 trim quiet edges to approximately 250 ms of padding, shorten quiet pauses
@@ -453,7 +459,7 @@ The main runtime settings are environment variables:
 | `MOSSFORMER2_SR_REPO_ID`, `MOSSFORMER2_SR_REVISION` | Optional MossFormer2_SR_48K Hub source overrides |
 | `TONTAUBE_CACHE_DIR` | Cache for derived Tontaube runtime artifacts; defaults to `~/.cache/tontaube` |
 | `VOICE_PATH` | Inference-server folder used for server-side `voice_path` requests and relative `DEFAULT_VOICE` overrides |
-| `DEFAULT_VOICE` | Voice used when a request supplies none; defaults to bundled `samples/Miles.wav`, or accepts a path relative to `VOICE_PATH` or an absolute path |
+| `DEFAULT_VOICE` | Audio reference used when none is supplied; defaults to bundled `samples/Marcus.mp3`, or accepts a path relative to `VOICE_PATH` or an absolute path |
 | `REQUIRE_API_KEY` | Require an `x-api-key` header; defaults to `0` |
 | `TTS_API_KEY` | Shared secret used when authentication is enabled |
 | `TTS_CORS_ORIGINS` | Comma-separated browser origins allowed to call the API; defaults to the local UI on port 3000 |

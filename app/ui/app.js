@@ -10,7 +10,7 @@ const download = byId("download");
 let resultUrl = null;
 let playbackUrl = null;
 let voicePreviewUrl = null;
-const defaultVoiceByLanguage = {english: "Miles"};
+const defaultVoiceByLanguage = {english: "Marcus"};
 
 function baseUrl() {
   const entered = byId("server-url").value.trim().replace(/\/+$/, "");
@@ -342,7 +342,7 @@ async function refreshVoices(quiet = false) {
     select.replaceChildren();
     if (!voices.length) {
       showVoicePlaceholder("No sample voices found for this language");
-      if (!quiet) setStatus("error", "No audio files were found in the server voice folder.");
+      if (!quiet) setStatus("error", "No audio files were found in the local UI voice folder.");
       return;
     }
     const styleGroups = new Map();
@@ -390,10 +390,13 @@ function syncTransportState() {
 function showVoiceFile() {
   const file = byId("voice-file").files[0];
   byId("voice-file-meta").hidden = !file;
+  byId("voice-preview").pause();
+  byId("voice-preview").removeAttribute("src");
   byId("voice-preview").hidden = !file;
+  if (voicePreviewUrl) URL.revokeObjectURL(voicePreviewUrl);
+  voicePreviewUrl = undefined;
   if (!file) return;
   byId("voice-file-name").textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MiB`;
-  if (voicePreviewUrl) URL.revokeObjectURL(voicePreviewUrl);
   voicePreviewUrl = URL.createObjectURL(file);
   byId("voice-preview").src = voicePreviewUrl;
 }

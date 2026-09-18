@@ -196,9 +196,16 @@ def test_request_rejects_empty_voice_tokens(voice_tokens):
         TTSRequest(text="Hello", voice_tokens=voice_tokens)
 
 
-def test_default_voice_is_bundled_miles(monkeypatch):
+def test_default_voice_is_bundled_marcus(monkeypatch):
     monkeypatch.delenv("DEFAULT_VOICE", raising=False)
-    assert ServerConfig().default_voice.endswith("/voices/samples/Miles.wav")
+    assert ServerConfig().default_voice.endswith("/voices/samples/Marcus.mp3")
+
+
+def test_voice_paths_accept_audio_but_not_token_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOICE_PATH", str(tmp_path))
+    assert TTSRequest(text="Hello", voice_path="Marcus.mp3").voice_path.endswith("Marcus.mp3")
+    with pytest.raises(ValidationError, match="supported audio"):
+        TTSRequest(text="Hello", voice_path="Marcus.json")
 
 
 def test_request_limits_text_and_reference_audio_size():

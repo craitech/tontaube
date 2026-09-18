@@ -1,20 +1,187 @@
 {
   "version": 1,
   "voices": {
-    "Arthur.wav": {"language": "en", "style": "agentic"},
-    "Clara.wav": {"language": "en", "style": "agentic"},
-    "Frederick.wav": {"language": "en", "style": "audiobook"},
-    "Henry.wav": {"language": "en", "style": "agentic"},
-    "John.wav": {"language": "en", "style": "agentic"},
-    "Josie.wav": {"language": "en", "style": "agentic"},
-    "Julian.wav": {"language": "en", "style": "agentic"},
-    "Juri.wav": {"language": "de", "style": "audiobook"},
-    "Lucas.wav": {"language": "en", "style": "agentic"},
-    "Miles.wav": {"language": "en", "style": "audiobook"},
-    "Nora.wav": {"language": "en", "style": "agentic"},
-    "Oskar.wav": {"language": "de", "style": "audiobook"},
-    "Riley.wav": {"language": "en", "style": "conversational"},
-    "Sofia.wav": {"language": "de", "style": "agentic"},
-    "Vivian.wav": {"language": "en", "style": "agentic"}
+    "Adam.mp3": {
+      "language": "fr",
+      "style": "audiobook"
+    },
+    "Andrea.mp3": {
+      "language": "it",
+      "style": "audiobook"
+    },
+    "Arthur.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Clara.wav": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Daniel.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Dante.mp3": {
+      "language": "it",
+      "style": "audiobook"
+    },
+    "Diego.mp3": {
+      "language": "es",
+      "style": "agentic"
+    },
+    "Eleanor.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Elias.mp3": {
+      "language": "en"
+    },
+    "Fernando.mp3": {
+      "language": "es",
+      "style": "audiobook"
+    },
+    "Frederick.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Glenn.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Graham.mp3": {
+      "language": "en",
+      "style": "conversational"
+    },
+    "Hannah.mp3": {
+      "language": "en",
+      "style": "conversational"
+    },
+    "Henry.wav": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Hugo.mp3": {
+      "language": "fr",
+      "style": "agentic"
+    },
+    "John.wav": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Josie.wav": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Julian.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Juri.mp3": {
+      "language": "de",
+      "style": "audiobook"
+    },
+    "Keith.mp3": {
+      "language": "en",
+      "style": "conversational"
+    },
+    "Lars.mp3": {
+      "language": "nl",
+      "style": "agentic"
+    },
+    "Lotte.mp3": {
+      "language": "nl",
+      "style": "agentic"
+    },
+    "Lucas.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Luis.mp3": {
+      "language": "es",
+      "style": "agentic"
+    },
+    "Madeline.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Marcus.mp3": {
+      "language": "en"
+    },
+    "Martim.mp3": {
+      "language": "pt",
+      "style": "agentic"
+    },
+    "Michael.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Miles.wav": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Nicolas.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Nora.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Oskar.mp3": {
+      "language": "de",
+      "style": "audiobook"
+    },
+    "Penelope.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Riley.wav": {
+      "language": "en",
+      "style": "conversational"
+    },
+    "Roberto.mp3": {
+      "language": "it",
+      "style": "agentic"
+    },
+    "Simon.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Sofia.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Stella.mp3": {
+      "language": "en",
+      "style": "conversational"
+    },
+    "Thijs.mp3": {
+      "language": "nl",
+      "style": "audiobook"
+    },
+    "Tiago.mp3": {
+      "language": "pt",
+      "style": "audiobook"
+    },
+    "Timothy.mp3": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "Tony.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Victoria.mp3": {
+      "language": "en",
+      "style": "audiobook"
+    },
+    "Vivian.wav": {
+      "language": "en",
+      "style": "agentic"
+    },
+    "William.mp3": {
+      "language": "en",
+      "style": "agentic"
+    }
   }
 }

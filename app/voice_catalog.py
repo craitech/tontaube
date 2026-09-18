@@ -90,7 +90,11 @@ def available_voice_files(
         return []
     voices = []
     for path in sorted(files_directory.iterdir(), key=lambda item: item.name.casefold()):
-        if not path.is_file() or path.suffix.lower() not in VOICE_AUDIO_EXTENSIONS:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.suffix.lower() not in VOICE_AUDIO_EXTENSIONS
+        ):
             continue
         metadata = manifest.get(path.name, {})
         declared_language = metadata.get("language")

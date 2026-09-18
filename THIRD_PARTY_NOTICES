@@ -20,6 +20,21 @@ upstream configuration and class definitions remain in those source modules.
 VibeVoice model weights are not part of this source repository and are not
 licensed by the repository's Apache License 2.0.
 
+### Alibaba ClearerVoice MossFormer2 speech super-resolution
+
+- Source: <https://github.com/modelscope/ClearerVoice-Studio>
+- Upstream revision: `6b3774dc79c46ae8bed2a4fa5f706f0ac8c75c61`
+- Vendored paths: `app/third_party/clearvoice_mossformer2_sr/`
+- Copyright (c) 2024 Alibaba Inc.
+- License: Apache-2.0
+- Complete license text: `app/third_party/clearvoice_mossformer2_sr/LICENSE`
+
+Only the inference architecture components required by MossFormer2_SR_48K are
+vendored. Its separately downloaded Apache-2.0 model weights are resolved from
+`alibabasglab/MossFormer2_SR_48K` at pinned revision
+`39eb1f25ea84f5e0315ade9ac0070fff216fc690` and remain subject to their own
+license material.
+
 ## Direct runtime components
 
 The following components are installed as separate packages rather than
@@ -38,6 +53,9 @@ files.
 | Pydantic | >=2.12,<3 | MIT | <https://github.com/pydantic/pydantic> |
 | Uvicorn | >=0.40,<1 | BSD-3-Clause | <https://github.com/Kludex/uvicorn> |
 | NumPy | >=1.26,<3 | BSD-3-Clause; bundled notices also apply | <https://github.com/numpy/numpy> |
+| SciPy | >=1.10,<2 | BSD-3-Clause | <https://github.com/scipy/scipy> |
+| librosa | >=0.10.2,<1.1 | ISC | <https://github.com/librosa/librosa> |
+| rotary-embedding-torch | 0.8.3 | MIT | <https://github.com/lucidrains/rotary-embedding-torch> |
 | Python SoundFile | 0.13.1 | BSD-3-Clause | <https://github.com/bastibe/python-soundfile> |
 | pydub | 0.25.1 | MIT | <https://github.com/jiaaro/pydub> |
 | opuslib | 3.0.1 | BSD-3-Clause | <https://github.com/onbeep/opuslib> |

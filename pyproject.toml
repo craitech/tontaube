@@ -29,7 +29,13 @@ include = ["app*", "VibeVoice*", "voices*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-app = ["ui/*.html", "ui/*.css", "ui/*.js", "ui/*.png"]
+app = [
+    "ui/*.html",
+    "ui/*.css",
+    "ui/*.js",
+    "ui/*.png",
+    "third_party/clearvoice_mossformer2_sr/LICENSE",
+]
 voices = [
     "LICENSE",
     "README.md",

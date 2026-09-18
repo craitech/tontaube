@@ -1,3 +1,4 @@
 include requirements-pip.lock
 include uv.lock
 recursive-include voices *.json *.md *.wav
+recursive-include tests *.py

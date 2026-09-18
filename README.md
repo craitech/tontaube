@@ -365,9 +365,10 @@ the prepared VibeVoice acoustic model each have an independent local-path
 override. Repository and revision variables provide the corresponding remote
 overrides.
 
-`tontaube preflight` downloads and prepares enabled models, then validates all
+`tontaube preflight` downloads and prepares enabled generation models, then validates all
 required files before GPU initialization. It does not download VibeVoice or the
-verbalizer when the corresponding feature is disabled.
+verbalizer when the corresponding feature is disabled. MossFormer2 is loaded
+separately on the first non-streaming request that enables it.
 The interactive OpenAPI documentation is available at
 `http://127.0.0.1:8080/docs` after startup.
 
@@ -404,10 +405,23 @@ When no voice source is supplied, the server uses the bundled Miles reference.
 codebooks apply their own smaller caps. Reference audio should contain clean
 speech from one speaker.
 
-Audio is synthesized at 24 kHz. WAV and MP3 retain that sample rate, while
-complete Ogg/Opus files use the standard 48 kHz Opus playback clock. For
-server-sent MP3 chunks, send the same request to `POST /stream`.
+Audio is synthesized at 24 kHz. By default, non-streaming `/predict` requests
+trim quiet edges to approximately 250 ms of padding, shorten quiet pauses
+longer than 2.5 seconds with a crossfade, and return 48 kHz audio using hybrid
+MossFormer2_SR_48K enhancement. The hybrid retains the source's low-frequency
+band and adds reconstructed high frequencies, using 4-second windows with
+1-second overlap. Set `trim_silence_padding_ms: null` to disable edge trimming,
+or `mossformer2_postprocess: false` to disable both enhancement and pause
+shortening. Disable both to keep the original duration and 24 kHz waveform
+before output encoding. Ogg/Opus files always use a 48 kHz playback clock.
+The enhancer's approximately 420 MiB of weights are downloaded to the standard
+Hugging Face cache on first use. Its CUDA weights and working memory are extra
+to the codebook budgets; allow GPU headroom and expect a slower first request.
+
+For server-sent MP3 chunks, send the request to `POST /stream`.
 `WS /ws/stream` returns framed Opus audio from the 24 kHz synthesis stream.
+Streaming does not apply edge trimming, pause shortening, or MossFormer2;
+omit `mossformer2_postprocess` or set it to `false` for streaming.
 Streaming always uses VibeVoice. The `bitrate` and `priority` fields apply to
 every streaming route; `vllm_priority` is limited to non-streaming `/predict`
 calls. An explicit
@@ -435,6 +449,8 @@ The main runtime settings are environment variables:
 | `W2VBERT_MODEL_REPO_ID`, `W2VBERT_MODEL_REVISION` | Optional W2V-BERT Hub source overrides |
 | `VIBEVOICE_MODEL_PATH` | Optional local prepared VibeVoice acoustic-model override |
 | `VIBEVOICE_MODEL_REPO_ID`, `VIBEVOICE_MODEL_REVISION` | Optional VibeVoice Hub source overrides |
+| `MOSSFORMER2_SR_MODEL_PATH` | Optional local directory containing the two MossFormer2_SR_48K checkpoints |
+| `MOSSFORMER2_SR_REPO_ID`, `MOSSFORMER2_SR_REVISION` | Optional MossFormer2_SR_48K Hub source overrides |
 | `TONTAUBE_CACHE_DIR` | Cache for derived Tontaube runtime artifacts; defaults to `~/.cache/tontaube` |
 | `VOICE_PATH` | Inference-server folder used for server-side `voice_path` requests and relative `DEFAULT_VOICE` overrides |
 | `DEFAULT_VOICE` | Voice used when a request supplies none; defaults to bundled `samples/Miles.wav`, or accepts a path relative to `VOICE_PATH` or an absolute path |

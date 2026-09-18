@@ -2937,6 +2937,19 @@ wheels = [
 ]
 
 [[package]]
+name = "rotary-embedding-torch"
+version = "0.8.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f7/1b/a48e340986fc7bc208b89ebe532036db68c0b22c8d944584b80301a63a81/rotary_embedding_torch-0.8.3.tar.gz", hash = "sha256:6ecad1e830616a99380deb466383fc5a8c225ab53ead1b1d3fecd71978e1f63a", size = 7158, upload-time = "2024-09-07T12:19:31.389Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/64/c0062faf35184b8d3cbe7863589cd69dbca4bde0115ac5eea1aa480d1194/rotary_embedding_torch-0.8.3-py3-none-any.whl", hash = "sha256:971c963e9d37a1d82577014a7feda62d1b785562cfba22ffa4ab2ea0eebd910f", size = 5502, upload-time = "2024-09-07T12:19:30.506Z" },
+]
+
+[[package]]
 name = "rpds-py"
 version = "2026.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3326,10 +3339,13 @@ dependencies = [
     { name = "fastapi" },
     { name = "huggingface-hub" },
     { name = "lameenc" },
+    { name = "librosa" },
     { name = "numpy" },
     { name = "opuslib" },
     { name = "pydantic" },
     { name = "pydub" },
+    { name = "rotary-embedding-torch" },
+    { name = "scipy" },
     { name = "soundfile" },
     { name = "torch" },
     { name = "torchaudio" },
@@ -3350,12 +3366,15 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "huggingface-hub", specifier = ">=0.34,<2" },
     { name = "lameenc", specifier = "==1.8.2" },
+    { name = "librosa", specifier = ">=0.10.2,<1.1" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "opuslib", specifier = "==3.0.1" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydub", specifier = "==0.25.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24,<2" },
+    { name = "rotary-embedding-torch", specifier = "==0.8.3" },
+    { name = "scipy", specifier = ">=1.10,<2" },
     { name = "soundfile", specifier = "==0.13.1" },
     { name = "torch", specifier = "==2.9.1" },
     { name = "torchaudio", specifier = "==2.9.1" },

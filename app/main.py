@@ -1,4 +1,5 @@
 """HTTP API for Tontaube text-to-speech inference."""
+import asyncio
 import math
 import os
 import multiprocessing
@@ -85,12 +86,54 @@ def _prepare_raw_text(text: str | list[str]) -> str | list[str]:
     return _ensure_punctuation(text)
 
 
-def _encode_audio(audio, output_format: str, bitrate: str) -> tuple[bytes, str]:
+def _trim_boundary_silence(
+    audio,
+    *,
+    padding_ms: int,
+    silence_threshold_dbfs: float = -50.0,
+):
+    """Trim excess edge silence while preserving all internal pauses."""
+    if padding_ms < 0 or audio.shape[-1] == 0:
+        return audio
+
+    samples = audio.detach().float().reshape(-1, audio.shape[-1])
+    mono_power = samples.square().mean(dim=0)
+    frame_samples = max(1, round(DUALCODEC_SAMPLE_RATE * 0.02))
+    hop_samples = max(1, round(DUALCODEC_SAMPLE_RATE * 0.01))
+    if mono_power.numel() < frame_samples:
+        return audio
+
+    frame_rms = mono_power.unfold(0, frame_samples, hop_samples).mean(dim=-1).sqrt()
+    threshold = 10.0 ** (silence_threshold_dbfs / 20.0)
+    active_frames = (frame_rms >= threshold).nonzero(as_tuple=False).flatten()
+    if active_frames.numel() == 0:
+        return audio
+
+    padding_samples = round(DUALCODEC_SAMPLE_RATE * padding_ms / 1000)
+    # Retain the entire active frames, including at zero requested padding.
+    # Frame centers would otherwise cut into the start and end of speech.
+    first_sample = int(active_frames[0].item()) * hop_samples
+    last_sample = int(active_frames[-1].item()) * hop_samples + frame_samples
+    # unfold omits a partial final hop; retain it if it contains signal.
+    covered = (len(frame_rms) - 1) * hop_samples + frame_samples
+    if covered < mono_power.numel() and mono_power[covered:].mean().sqrt() >= threshold:
+        last_sample = mono_power.numel()
+    start = max(0, first_sample - padding_samples)
+    end = min(audio.shape[-1], last_sample + padding_samples)
+    return audio[..., start:end]
+
+
+def _encode_audio(
+    audio,
+    output_format: str,
+    bitrate: str,
+    sample_rate: int = DUALCODEC_SAMPLE_RATE,
+) -> tuple[bytes, str]:
     wav_buffer = io.BytesIO()
     sf.write(
         wav_buffer,
         audio.cpu().squeeze(0).numpy().T,
-        DUALCODEC_SAMPLE_RATE,
+        sample_rate,
         format="WAV",
     )
     wav_bytes = wav_buffer.getvalue()
@@ -105,6 +148,18 @@ def _encode_audio(audio, output_format: str, bitrate: str) -> tuple[bytes, str]:
     )
     mime_type = "audio/mpeg" if output_format == "mp3" else "audio/ogg; codecs=opus"
     return encoded.getvalue(), mime_type
+
+
+def _apply_mossformer2_postprocessing(audio, input_sample_rate: int):
+    """Load and run the optional enhancer outside the async event loop."""
+    from app.mossformer2_postprocessor import (
+        MOSSFORMER2_SAMPLE_RATE,
+        get_mossformer2_postprocessor,
+    )
+
+    enhanced = get_mossformer2_postprocessor().process(audio, input_sample_rate)
+    return enhanced, MOSSFORMER2_SAMPLE_RATE
+
 
 class TTSRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -218,6 +273,24 @@ class TTSRequest(BaseModel):
     language: str = DEFAULT_LANGUAGE
     tag: Literal["audiobook", "conversational", "agentic"] = DEFAULT_TAG
     use_verbalization: bool = False
+    trim_silence_padding_ms: int | None = Field(
+        default=250,
+        ge=0,
+        le=2000,
+        description=(
+            "Trim leading and trailing silence beyond this padding. Defaults "
+            "to 250 ms; internal pauses are preserved and null disables trimming."
+        ),
+    )
+    mossformer2_postprocess: bool = Field(
+        default=True,
+        description=(
+            "Cap quiet pauses at 2.5 seconds, then apply hybrid MossFormer2_SR_48K "
+            "super-resolution after optional boundary trimming. Enabled by default "
+            "for non-streaming requests; "
+            "set false to return the original 24 kHz output."
+        ),
+    )
     format: Literal["wav", "mp3", "opus"] = "wav"
     bitrate: Literal["32k", "64k", "96k", "128k"] = Field(
         default="64k",
@@ -364,6 +437,11 @@ def _streaming_option_error(req: TTSRequest, transport: Literal["mp3", "opus"]) 
     """Return a clear error for request fields unsupported by a stream transport."""
     if req.vibevoice_postprocess is False:
         return "streaming requires vibevoice_postprocess=true"
+    if (
+        req.mossformer2_postprocess
+        and "mossformer2_postprocess" in req.model_fields_set
+    ):
+        return "mossformer2_postprocess is supported only by non-streaming /predict"
     if "format" in req.model_fields_set and req.format != transport:
         return f"this streaming route outputs {transport}; set format={transport!r} or omit format"
     if req.vllm_priority is not None:
@@ -433,11 +511,28 @@ async def _synthesize(req: TTSRequest) -> dict:
         vllm_priority=req.vllm_priority,
     )
 
-    audio_bytes, mime_type = _encode_audio(audio, req.format, req.bitrate)
+    output_sample_rate = DUALCODEC_SAMPLE_RATE
+    if req.trim_silence_padding_ms is not None:
+        audio = _trim_boundary_silence(
+            audio,
+            padding_ms=req.trim_silence_padding_ms,
+        )
+    if req.mossformer2_postprocess:
+        audio, output_sample_rate = await asyncio.to_thread(
+            _apply_mossformer2_postprocessing,
+            audio,
+            output_sample_rate,
+        )
+    audio_bytes, mime_type = _encode_audio(
+        audio,
+        req.format,
+        req.bitrate,
+        sample_rate=output_sample_rate,
+    )
     return TTSResponse(
         audio_b64=base64.b64encode(audio_bytes).decode("ascii"),
         mime_type=mime_type,
-        sample_rate=DUALCODEC_SAMPLE_RATE,
+        sample_rate=output_sample_rate,
         codebook_tokens=codebook_tokens,
     ).model_dump()
 

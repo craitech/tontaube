@@ -352,6 +352,7 @@ einops==0.8.2 \
     # via
     #   dualcodec
     #   flashinfer-python
+    #   rotary-embedding-torch
     #   vllm
 email-validator==2.3.0 \
     --hash=sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4 \
@@ -743,7 +744,9 @@ lazy-loader==0.5 \
 librosa==1.0.0 \
     --hash=sha256:5910a6c0e1b2e494b92758c1615a7acbd0515a2315e138927ba2982f2af88857 \
     --hash=sha256:73ed480d4022e436e85dfa6f6b06ff38a259b9210039ac99939cd64854b61a57
-    # via descript-audiotools
+    # via
+    #   descript-audiotools
+    #   tontaube-inference
 llguidance==1.3.0 ; platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 's390x' or platform_machine == 'x86_64' \
     --hash=sha256:098030ff0687261a3f1bd54cf21fe951fc861d56d37a0671250dd36677eaf224 \
     --hash=sha256:1d1cd1c8618d1a13605d3e057c978651e551c8c469b481ee4041f1d6c436002d \
@@ -1541,6 +1544,10 @@ rignore==0.8.1 \
     --hash=sha256:b9e7ba47a5bb25ad45d39983047ecfbcba01ecda0145458c548cd3f390b73bb7 \
     --hash=sha256:dd43540d294fbcb66daf66836b6c57043c0d3af672722099cd4a0c91448d948e
     # via fastapi-cloud-cli
+rotary-embedding-torch==0.8.3 \
+    --hash=sha256:6ecad1e830616a99380deb466383fc5a8c225ab53ead1b1d3fecd71978e1f63a \
+    --hash=sha256:971c963e9d37a1d82577014a7feda62d1b785562cfba22ffa4ab2ea0eebd910f
+    # via tontaube-inference
 rpds-py==2026.6.3 \
     --hash=sha256:127565fead0a10943b282957bd5447804ff3160ad79f2ad2635e6d249e380680 \
     --hash=sha256:1cebd1337c242e4ec2293e541f712b2da849b29f48f0c293684b71c0632625d4 \
@@ -1613,6 +1620,7 @@ scipy==1.18.0 \
     #   pyloudnorm
     #   pystoi
     #   scikit-learn
+    #   tontaube-inference
 sentencepiece==0.2.2 \
     --hash=sha256:1edb10e520e4bddf74d85b0f5ae74cc2d60c2b448885080bfb618bc2b3a49f6b \
     --hash=sha256:38111ed1f79268f399c505028023d5eaaf0ab4e5eafceb709468b0d3323e7838 \
@@ -1775,6 +1783,7 @@ torch==2.9.1 \
     #   dualcodec
     #   flashinfer-python
     #   julius
+    #   rotary-embedding-torch
     #   tontaube-inference
     #   torch-stoi
     #   torchaudio

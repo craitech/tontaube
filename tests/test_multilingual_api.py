@@ -114,9 +114,18 @@ def test_request_rejects_ambiguous_instances_envelope():
         )
 
 
-def test_optional_services_are_disabled_by_default():
+def test_request_and_service_defaults():
     assert REQUIRE_API_KEY is False
     assert TTSRequest(text="Hello").use_verbalization is False
+    assert TTSRequest(text="Hello").mossformer2_postprocess is True
+    assert TTSRequest(text="Hello").trim_silence_padding_ms == 250
+    opt_out = TTSRequest(
+        text="Hello",
+        mossformer2_postprocess=False,
+        trim_silence_padding_ms=None,
+    )
+    assert opt_out.mossformer2_postprocess is False
+    assert opt_out.trim_silence_padding_ms is None
     assert ServerConfig().enable_verbalization is False
 
 
@@ -218,6 +227,9 @@ def test_streaming_options_are_explicit_and_transport_specific():
     )
     assert "not supported for streaming" in _streaming_option_error(
         TTSRequest(text="x", vllm_priority=10), "mp3"
+    )
+    assert "non-streaming /predict" in _streaming_option_error(
+        TTSRequest(text="x", mossformer2_postprocess=True), "mp3"
     )
     assert "at least 80" in _streaming_option_error(
         TTSRequest(

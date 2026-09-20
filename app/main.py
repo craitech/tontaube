@@ -272,6 +272,7 @@ class TTSRequest(BaseModel):
     )
     language: str = DEFAULT_LANGUAGE
     tag: Literal["audiobook", "conversational", "agentic"] = DEFAULT_TAG
+    use_system_tag: bool = True
     use_verbalization: bool = False
     trim_silence_padding_ms: int | None = Field(
         default=250,
@@ -368,13 +369,20 @@ class TTSRequest(BaseModel):
                 )
         return rows
 
-    @field_validator('voice_tokens')
+    @field_validator('voice_tokens', mode='before')
     @classmethod
     def validate_voice_tokens(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(
+            not isinstance(row, list) or any(type(token) is not int for token in row)
+            for row in value
+        ):
+            raise ValueError('voice tokens must be lists of integer IDs')
         rows = cls._validate_token_rows(value, MAX_VOICE_PROMPT_TOKENS)
-        if rows is not None and (not rows or not rows[0]):
+        if not rows or not rows[0]:
             raise ValueError('voice-token rows must not be empty')
-        if rows and len({len(row) for row in rows}) > 1:
+        if len({len(row) for row in rows}) > 1:
             raise ValueError('voice-token rows must have equal lengths')
         return rows
 
@@ -508,6 +516,7 @@ async def _synthesize(req: TTSRequest) -> dict:
         prompt_max_tokens=req.prompt_max_tokens,
         language=req.language,
         tag=req.tag,
+        use_system_tag=req.use_system_tag,
         vllm_priority=req.vllm_priority,
     )
 
@@ -674,6 +683,7 @@ def create_app():
             "text_preprocessor": preprocessor,
             "language": req.language,
             "tag": req.tag,
+            "use_system_tag": req.use_system_tag,
         }
 
     @app.post(

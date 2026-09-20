@@ -213,6 +213,7 @@ class TTSEngine:
         acoustic_top_k: int | None = None,
         language: str = DEFAULT_LANGUAGE,
         tag: str = DEFAULT_TAG,
+        use_system_tag: bool = True,
     ) -> tuple[dict, tuple, str, float, int]:
         """Resolve and default all generation parameters.
 
@@ -228,8 +229,11 @@ class TTSEngine:
         top_p = top_p if top_p is not None else self.config.top_p
         top_k = top_k if top_k is not None else self.config.top_k
         frequency_penalty = frequency_penalty if frequency_penalty is not None else 0.0
-        system_prompt = build_system_prompt(language, tag)
-        system_tag = f'<|im_start|>{system_prompt}<|im_end|>\n'
+        if use_system_tag:
+            system_prompt = build_system_prompt(language, tag)
+            system_tag = f'<|im_start|>{system_prompt}<|im_end|>\n'
+        else:
+            system_tag = ''
 
         prompt_cap = (
             prompt_max_tokens
@@ -731,6 +735,7 @@ class TTSEngine:
         prompt_max_tokens: int | None = None,
         language: str = DEFAULT_LANGUAGE,
         tag: str = DEFAULT_TAG,
+        use_system_tag: bool = True,
         vllm_priority: int | None = None,
     ):
         start_time = time.time()
@@ -741,7 +746,7 @@ class TTSEngine:
             voice_path=voice_path, voice_audio_b64=voice_audio_b64,
             voice_tokens=voice_tokens, prompt_max_tokens=prompt_max_tokens,
             acoustic_temperature=acoustic_temperature, acoustic_top_k=acoustic_top_k,
-            language=language, tag=tag,
+            language=language, tag=tag, use_system_tag=use_system_tag,
         )
         effective_vv_tokenizer = None if vibevoice_postprocess is False else self.vv_tokenizer
         segments = [text] if isinstance(text, str) else list(text)
@@ -812,22 +817,15 @@ class TTSEngine:
             dc_hz = DUALCODEC_HZ
             short_audio = len(semantic_codes) / dc_hz < 60
             free_memory()
-            result = decode_chunked_with_context(
+            audio_tensor = decode_chunked_with_context(
                 self.dc_inference, effective_vv_tokenizer,
                 semantic_codes, acoustic_codes,
                 hz=dc_hz,
                 context_seconds=self.config.chunk_context_seconds,
-                return_pre_vv=short_audio,
             )
-            if short_audio:
-                audio_tensor, raw_audio = result
-            else:
-                audio_tensor = result
-                raw_audio = None
 
-            if short_audio and raw_audio is not None:
-                retry_reason = self._check_audio_quality(raw_audio, audio_tensor)
-                del raw_audio
+            if short_audio:
+                retry_reason = self._check_audio_quality(audio_tensor)
                 if retry_reason is None:
                     break
                 logger.warning(
@@ -862,40 +860,23 @@ class TTSEngine:
 
     @staticmethod
     def _check_audio_quality(
-        raw_audio: 'torch.Tensor',
         audio_tensor: 'torch.Tensor',
     ) -> str | None:
-        """Compare pre-VV and post-VV audio. Returns retry reason or None if OK."""
-        pre_vv = raw_audio.float().cpu()
+        """Retain silence/invalid-output retries without comparing raw and VV audio."""
         post_vv = audio_tensor.float().cpu()
-        pre_vv_rms = pre_vv.pow(2).mean().sqrt().item()
+        if post_vv.numel() == 0:
+            return "empty_audio"
+        if not torch.isfinite(post_vv).all().item():
+            return "non_finite_audio"
         post_vv_rms = post_vv.pow(2).mean().sqrt().item()
-        n = min(pre_vv.shape[-1], post_vv.shape[-1])
-        diff_rms = (pre_vv[..., :n] - post_vv[..., :n]).pow(2).mean().sqrt().item()
         logger.debug(
-            "Decode quality: pre_rms=%.6f pre_peak=%.6f post_rms=%.6f "
-            "post_peak=%.6f difference_rms=%.6f samples=%d->%d",
-            pre_vv_rms,
-            pre_vv.abs().max().item(),
+            "Decode quality: post_rms=%.6f post_peak=%.6f samples=%d",
             post_vv_rms,
             post_vv.abs().max().item(),
-            diff_rms,
-            pre_vv.shape[-1],
             post_vv.shape[-1],
         )
         if post_vv_rms <= 0.002:
             return f"silent (RMS={post_vv_rms:.6f})"
-        rms_diff = abs(pre_vv_rms - post_vv_rms)
-        if diff_rms > 0.10:
-            return (
-                f"VV divergence (pre={pre_vv_rms:.6f} post={post_vv_rms:.6f} "
-                f"diff between rms={rms_diff:.6f} rms of diff={diff_rms:.6f})"
-            )
-        if rms_diff > 0.03:
-            return (
-                f"VV rms diff (pre={pre_vv_rms:.6f} post={post_vv_rms:.6f} "
-                f"diff between rms={rms_diff:.6f} rms of diff={diff_rms:.6f})"
-            )
         return None
 
     def _resolve_voice_prompt(
@@ -993,6 +974,14 @@ class TTSEngine:
         semantic_only: list[int] = []
 
         for attempt in range(1, self.config.cb0_max_retries + 1):
+            # Keep the first retry at base temperature; increase only after it.
+            # Reset from the requested base for every segment; never mutate the
+            # shared sampling dictionary or compound increases across segments.
+            attempt_sampling = {
+                **sampling,
+                "temperature": sampling["temperature"]
+                + max(0, attempt - 2) * self.config.cb0_retry_temperature_step,
+            }
             raw_accumulated = []
             if force_silence:
                 raw_accumulated.append(silence_token)
@@ -1063,7 +1052,7 @@ class TTSEngine:
                 for sid in ORDINARY_SILENCE_TOKEN_IDS:
                     logit_bias[ctx.dc_base_id + sid] = self.config.cb0_ordinary_silence_logit_bias
                 sampling_params = SamplingParams(
-                    **sampling,
+                    **attempt_sampling,
                     max_tokens=remaining,
                     min_tokens=min(
                         remaining,
@@ -1129,11 +1118,12 @@ class TTSEngine:
             if failure is None:
                 break
             logger.warning(
-                "CB0 segment %d retry %d/%d: %s",
+                "CB0 segment %d retry %d/%d: %s (temperature=%.2f)",
                 seg_idx,
                 attempt,
                 self.config.cb0_max_retries,
                 failure,
+                attempt_sampling["temperature"],
             )
 
         n_sem = len(semantic_only)
@@ -1502,6 +1492,7 @@ class TTSEngine:
         text_preprocessor: 'Callable[[str], Awaitable[str]] | None' = None,
         language: str = DEFAULT_LANGUAGE,
         tag: str = DEFAULT_TAG,
+        use_system_tag: bool = True,
     ):
         """Wrapper that guarantees VV slot cleanup even on cancellation/error."""
         if self.vv_tokenizer is None:
@@ -1522,7 +1513,7 @@ class TTSEngine:
                 acoustic_temperature=acoustic_temperature, acoustic_top_k=acoustic_top_k,
                 prompt_max_tokens=prompt_max_tokens,
                 text_preprocessor=text_preprocessor,
-                language=language, tag=tag,
+                language=language, tag=tag, use_system_tag=use_system_tag,
             ):
                 yield chunk
         finally:
@@ -1553,6 +1544,7 @@ class TTSEngine:
         text_preprocessor: 'Callable[[str], Awaitable[str]] | None' = None,
         language: str = DEFAULT_LANGUAGE,
         tag: str = DEFAULT_TAG,
+        use_system_tag: bool = True,
     ):
         """Async generator yielding audio Tensors as they become available.
 
@@ -1567,7 +1559,7 @@ class TTSEngine:
             voice_path=voice_path, voice_audio_b64=voice_audio_b64,
             voice_tokens=voice_tokens, prompt_max_tokens=prompt_max_tokens,
             acoustic_temperature=acoustic_temperature, acoustic_top_k=acoustic_top_k,
-            language=language, tag=tag,
+            language=language, tag=tag, use_system_tag=use_system_tag,
         )
         segments = [text] if isinstance(text, str) else list(text)
         if text_preprocessor and segments:

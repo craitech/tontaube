@@ -252,8 +252,9 @@ class ServerConfig:
 
     cb0_max_retries: int = 5
     cb0_min_tokens: int = 13
-    cb0_min_cps: float = 6.0
-    cb0_max_cps: float = 24.0
+    cb0_min_cps: float = 8.0
+    cb0_max_cps: float = 20.0
+    cb0_retry_temperature_step: float = 0.05
     cb0_max_silence_ratio: float = 0.40
     # Mild penalties reduce premature EOS and silence-collapse onsets.
     cb0_eos_logit_bias: float = -0.8
@@ -293,7 +294,7 @@ class ServerConfig:
     streaming_chunk_seconds: float = 2.0  # must be multiple of 0.4s (aligns DC@12.5Hz and VV@7.5Hz)
     max_vv_decode_queue_size: int = MAX_VV_DECODE_QUEUE_SIZE
 
-    trailing_silence_tokens: int = 3  # silence tokens appended after final segment to avoid cut-off
+    trailing_silence_tokens: int = 0
     force_first_silence: bool = True  # force first predicted cb0 token to be SILENCE_TOKEN_ID
     # When True, low-priority requests (e.g. /predict without priority="high")
     # pause between vLLM generation calls while any high-priority request is

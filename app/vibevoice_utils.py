@@ -57,7 +57,7 @@ def _warmup_vibevoice(tokenizer, device: str):
         frames = tokenizer.encode(dummy_wav).mean  # [1, ~7-8, D]
         cache = VibeVoiceTokenizerStreamingCache()
         sample_indices = torch.tensor([0], device=device)
-        tokenizer.decode(frames, cache=cache, sample_indices=sample_indices, use_cache=True)
+        tokenizer.decode(frames.transpose(1, 2).contiguous(), cache=cache, sample_indices=sample_indices, use_cache=True)
 
 
 def _vv_dtype(vv_tokenizer) -> torch.dtype:
@@ -81,6 +81,8 @@ def vv_decode_streaming(
     """Causal streaming decode: VV latent frames → audio.
 
     Pass the same cache across successive calls to extend seamlessly.
+    Frames arrive as [B, T, D]; pass explicit [B, D, T] to avoid the
+    tokenizer's ambiguous layout inference when T == D (64 frames).
     Returns (audio [1, 1, T_audio], updated cache).
     """
     if cache is None:
@@ -89,7 +91,7 @@ def vv_decode_streaming(
         return torch.zeros(1, 1, 0), cache
     frames = frames.to(vv_tokenizer.device, dtype=_vv_dtype(vv_tokenizer))
     sample_indices = torch.tensor([0], device=vv_tokenizer.device)
-    audio = vv_tokenizer.decode(frames, cache=cache, sample_indices=sample_indices, use_cache=True)
+    audio = vv_tokenizer.decode(frames.transpose(1, 2).contiguous(), cache=cache, sample_indices=sample_indices, use_cache=True)
     return audio.cpu().to(torch.float32), cache
 
 
@@ -210,7 +212,7 @@ class VVDecodeEngine:
             slots = torch.tensor([s for _, s, _, _ in active], device=device)
             with torch.no_grad():
                 audio_chunk = self.vv_tokenizer.decode(
-                    stacked, cache=self._shared_cache,
+                    stacked.transpose(1, 2).contiguous(), cache=self._shared_cache,
                     sample_indices=slots, use_cache=True,
                 )  # [B, 1, T_audio_chunk]
             audio_chunk = audio_chunk.cpu().to(torch.float32)

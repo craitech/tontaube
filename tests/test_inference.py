@@ -670,7 +670,7 @@ class TestGenerateContextRouting:
 
     @pytest.mark.asyncio
     @patch("app.inference.decode_chunked_with_context",
-           return_value=(torch.ones(1, 1, 1000), torch.ones(1, 1, 1000)))
+           return_value=torch.ones(1, 1, 1000))
     async def test_semantic_context_and_independent_acoustics(self, mock_decode):
         """CB0 uses chunk context while acoustic chunks remain independent."""
         sem_mock = AsyncMock(return_value=(list(range(60)), [30]))
@@ -693,7 +693,7 @@ class TestGenerateContextRouting:
 
     @pytest.mark.asyncio
     @patch("app.inference.decode_chunked_with_context",
-           return_value=(torch.ones(1, 1, 1000), torch.ones(1, 1, 1000)))
+           return_value=torch.ones(1, 1, 1000))
     async def test_default_context_only_cb0(self, mock_decode):
         """The context strategy is stable when callers use default arguments."""
         sem_mock = AsyncMock(return_value=(list(range(60)), [30]))

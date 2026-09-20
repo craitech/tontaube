@@ -208,6 +208,13 @@ def test_voice_paths_accept_audio_but_not_token_json(tmp_path, monkeypatch):
         TTSRequest(text="Hello", voice_path="Marcus.json")
 
 
+def test_inline_voice_tokens_remain_supported_without_integer_coercion():
+    assert TTSRequest(text="Hello", voice_tokens=[[1], [2], [3]]).voice_tokens == [[1], [2], [3]]
+    for token in (True, 1.0, "1"):
+        with pytest.raises(ValidationError):
+            TTSRequest(text="Hello", voice_tokens=[[token]])
+
+
 def test_request_limits_text_and_reference_audio_size():
     TTSRequest(text="x" * MAX_REQUEST_TEXT_CHARS)
     TTSRequest(text=["x"] * MAX_REQUEST_TEXT_SEGMENTS)
@@ -329,8 +336,10 @@ def test_engine_uses_one_stack_for_every_language_tag():
     engine = TTSEngine(ServerConfig())
     _, _, german_tag, _, _ = engine._resolve_params(language="de", tag="agentic")
     _, _, french_tag, _, _ = engine._resolve_params(language="fr", tag="audiobook")
+    _, _, no_tag, _, _ = engine._resolve_params(use_system_tag=False)
     assert german_tag == "<|im_start|>german : agentic<|im_end|>\n"
     assert french_tag == "<|im_start|>french : audiobook<|im_end|>\n"
+    assert no_tag == ""
     assert isinstance(engine.engines, list)
 
 

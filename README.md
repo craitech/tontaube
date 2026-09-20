@@ -393,12 +393,16 @@ curl --silent http://127.0.0.1:8080/predict \
 
 The sampling-temperature default is `0.8`. A lower value such as `0.6` favors
 correctness; values near `1.0` can produce more natural and expressive results.
+Automatic CB0 retries keep the requested temperature for the first two attempts,
+then increase it by 0.05 per attempt (up to five attempts in total).
+`use_system_tag: false` omits the language/style control block; it defaults to
+`true`, using the selected `language` and `tag`.
 
 For voice cloning, provide one of:
 
 - `voice_audio_b64`: base64-encoded reference audio in any FFmpeg-supported format
 - `voice_tokens`: precomputed semantic and acoustic prompt-token rows
-- `voice_path`: an audio path inside the inference server's configured `VOICE_PATH`
+- `voice_path`: an audio path inside the server's configured `VOICE_PATH`
 
 When no voice source is supplied, the server uses the bundled Marcus reference.
 `prompt_max_tokens` can cap CB0 at 1--750 voice-prompt tokens; the later

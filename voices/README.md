@@ -31,7 +31,7 @@ Marcus is the default voice. Marcus and Elias have no declared style.
 Database styles `Narration` and `Conversation` correspond to manifest styles
 `audiobook` and `conversational`; `Agentic` corresponds to `agentic`. Omit a
 style or language when it is unspecified. The manifest does not change the
-generation request's selected style.
+generation request's selected style or system-tag setting.
 
 The bundled voice references are released under the [MIT License](LICENSE).
 

@@ -1,0 +1,313 @@
+{
+ "description": "Calibration texts for tontaube quantize.",
+ "items": [
+  {
+   "id": "cal_en00",
+   "language": "english",
+   "tag": "audiobook",
+   "voice": "samples/Frederick.mp3",
+   "text": "Her eye discourses, I will answer it. I am too bold, 'tis not to me she speaks. Two of the fairest stars in all the heaven, Having some business, do entreat her eyes To twinkle in their spheres till they return. What if her eyes were there, they in her head?"
+  },
+  {
+   "id": "cal_en01",
+   "language": "english",
+   "tag": "conversational",
+   "voice": "samples/Penelope.mp3",
+   "text": "How much effect it had, is indicated by the still more deplorable wars that followed."
+  },
+  {
+   "id": "cal_en02",
+   "language": "english",
+   "tag": "agentic",
+   "voice": "samples/Keith.mp3",
+   "text": "Recovering himself, however, shortly, he turned to his partner, and said,-- \"Sir William's interruption has made me forget what we were talking of.\" \"I do not think we were speaking at all. Sir William could not have interrupted any two people in the room who had less to say for themselves."
+  },
+  {
+   "id": "cal_en03",
+   "language": "english",
+   "tag": "audiobook",
+   "voice": "samples/Stella.mp3",
+   "text": "But they supposed that, in erecting the temple of Concord within the view of the orators, as a memorial of the punishment and death of the Gracchi, they were raising an effectual obstacle to sedition."
+  },
+  {
+   "id": "cal_en04",
+   "language": "english",
+   "tag": "conversational",
+   "voice": "samples/Simon.mp3",
+   "text": "The brightness of her cheek would shame those stars, As daylight doth a lamp; her eyes in heaven Would through the airy region stream so bright That birds would sing and think it were not night."
+  },
+  {
+   "id": "cal_en05",
+   "language": "english",
+   "tag": "agentic",
+   "voice": "samples/Victoria.mp3",
+   "text": "We have tried two or three subjects already without success, and what we are to talk of next I cannot imagine.\" \"Books--oh no!--I am sure we never read the same, or not with the same feelings.\" \"I am sorry you think so; but if that be the case, there can at least be no want of subject."
+  },
+  {
+   "id": "cal_en06",
+   "language": "english",
+   "tag": "audiobook",
+   "voice": "samples/Hannah.mp3",
+   "text": "See how she leans her cheek upon her hand. Of the various kinds of wars which followed the building of the temple of Concord."
+  },
+  {
+   "id": "cal_en07",
+   "language": "english",
+   "tag": "conversational",
+   "voice": "samples/Julian.mp3",
+   "text": "Be it known that, waiving all argument, I take the good old fashioned ground that the whale is a fish, and call upon holy Jonah to back me."
+  },
+  {
+   "id": "cal_en08",
+   "language": "english",
+   "tag": "agentic",
+   "voice": "samples/Frederick.mp3",
+   "text": "Charley profanely hinted they were humbug."
+  },
+  {
+   "id": "cal_en09",
+   "language": "english",
+   "tag": "audiobook",
+   "voice": "samples/Penelope.mp3",
+   "text": "Be not her maid since she is envious; Her vestal livery is but sick and green, And none but fools do wear it; cast it off. It is my lady, O it is my love! O, that she knew she were! She speaks, yet she says nothing."
+  },
+  {
+   "id": "cal_en10",
+   "language": "english",
+   "tag": "conversational",
+   "voice": "samples/Keith.mp3",
+   "text": "This fundamental thing settled, the next point is, in what internal respect does the whale differ from other fish."
+  },
+  {
+   "id": "cal_en11",
+   "language": "english",
+   "tag": "agentic",
+   "voice": "samples/Stella.mp3",
+   "text": "We may compare our different opinions.\" \"No--I cannot talk of books in a ball-room; my head is always full of something else.\" \"The present always occupies you in such scenes--does it?\" said he, with a look of doubt."
+  },
+  {
+   "id": "cal_ge00",
+   "language": "german",
+   "tag": "audiobook",
+   "voice": "samples/Juri.mp3",
+   "text": "Ich studierte alles durcheinander, ohne System, ohne Wahl, Chemie, Alchimie, Geschichte, Astronomie, Philosophie, die Rechtswissenschaften, Anatomie und Literatur; las Homer, Virgil, Ossian, Schiller, Goethe, Shakespeare, Cervantes, Voltaire, Molière, den Koran, den Kosmos, Casanovas Memoiren."
+  },
+  {
+   "id": "cal_ge01",
+   "language": "german",
+   "tag": "conversational",
+   "voice": "samples/Oskar.mp3",
+   "text": "Nein, das hätte keinen Zweck. Jetzt Lärm machen! Der Chauffeur hatte im Auftrag des Blondbärtigen gearbeitet. Das war zweifellos!"
+  },
+  {
+   "id": "cal_ge02",
+   "language": "german",
+   "tag": "agentic",
+   "voice": "samples/Juri.mp3",
+   "text": "Ich meine, daß ich die Schwärmerei für den karthagischen General noch ein Stück weiter in meine Kindheit zurück verfolgen kann, so daß es sich auch hier nur um die Übertragung einer bereits gebildeten Affektrelation auf einen neuen Träger handeln dürfte."
+  },
+  {
+   "id": "cal_ge03",
+   "language": "german",
+   "tag": "audiobook",
+   "voice": "samples/Oskar.mp3",
+   "text": "Hinter dem großen grünen Ofen konnte jeden Augenblick Mephistopheles als fahrender Scholast hervortreten."
+  },
+  {
+   "id": "cal_ge04",
+   "language": "german",
+   "tag": "conversational",
+   "voice": "samples/Juri.mp3",
+   "text": "Dadurch, daß er sich ins Polster setzte, öffnete er wohl die Gasleitung; denn es war kein Gas im Wagen, als er einstieg."
+  },
+  {
+   "id": "cal_ge05",
+   "language": "german",
+   "tag": "agentic",
+   "voice": "samples/Oskar.mp3",
+   "text": "So irrte ich den ganzen Tag herum, und die Sonne schien schon schief zwischen den Baumstämmen hindurch, als ich endlich in ein kleines Wiesental hinauskam, das rings von Bergen eingeschlossen und voller roter und gelber Blumen war, über denen unzählige Schmetterlinge im Abendgolde herumflatterten."
+  },
+  {
+   "id": "cal_ge06",
+   "language": "german",
+   "tag": "audiobook",
+   "voice": "samples/Juri.mp3",
+   "text": "(Diese Bevorzugung wird wohl auch durch den Zufall des gleichen Geburtsdatums, genau hundert Jahre später, aufzuklären sein.) Napoleon selbst schließt sich durch den Übergang über die Alpen an Hannibal an. Ringsum war niemand zu sehen und kein Laut zu vernehmen."
+  },
+  {
+   "id": "cal_ge07",
+   "language": "german",
+   "tag": "conversational",
+   "voice": "samples/Oskar.mp3",
+   "text": "Mit dem Spielen ging es aber auch nicht lange, denn ich stolperte dabei jeden Augenblick über die fatalen Baumwurzeln, auch fing mich zuletzt an zu hungern, und der Wald wollte noch immer gar kein Ende nehmen."
+  },
+  {
+   "id": "cal_ge08",
+   "language": "german",
+   "tag": "agentic",
+   "voice": "samples/Juri.mp3",
+   "text": "Ich befahl mich daher Gottes Führung, zog meine Violine hervor und spielte alle meine liebsten Stücke durch, daß es recht fröhlich in dem einsamen Walde erklang."
+  },
+  {
+   "id": "cal_ge09",
+   "language": "german",
+   "tag": "audiobook",
+   "voice": "samples/Oskar.mp3",
+   "text": "Eines der ersten Bücher, das dem lesefähigen Kinde in die Hände fiel, war Thiers' Konsulat und Kaiserreich; ich erinnere mich, daß ich meinen Holzsoldaten kleine Zettel mit den Namen der kaiserlichen Marschälle auf den flachen Rücken geklebt, und daß damals schon Masséna (als Jude: Menasse) mein erklärter Liebling war."
+  },
+  {
+   "id": "cal_ge10",
+   "language": "german",
+   "tag": "conversational",
+   "voice": "samples/Juri.mp3",
+   "text": "vier, fünf Stunden vor einem geschlossenen Bahnhof warten! Sollte er nicht jemand im Schloß wecken? Dann müßte er erzählen."
+  },
+  {
+   "id": "cal_ge11",
+   "language": "german",
+   "tag": "agentic",
+   "voice": "samples/Oskar.mp3",
+   "text": "Und der erste Zug?"
+  },
+  {
+   "id": "cal_fr00",
+   "language": "french",
+   "tag": "audiobook",
+   "voice": "samples/Hugo.mp3",
+   "text": "TYBALT.--Mon oncle, cet homme est un Montaigu, notre ennemi; un traître qui est venu ici ce soir, en haine de nous, pour se moquer de notre fête."
+  },
+  {
+   "id": "cal_fr01",
+   "language": "french",
+   "tag": "audiobook",
+   "voice": "samples/Adam.mp3",
+   "text": "Le visage de la Carlotta exprime la plus atroce douleur, ses yeux semblent hantés par la folie."
+  },
+  {
+   "id": "cal_fr02",
+   "language": "french",
+   "tag": "audiobook",
+   "voice": "samples/Hugo.mp3",
+   "text": "La pauvre femme s'est redressée, la bouche encore entr'ouverte, ayant fini de laisser passer \"cette voix solitaire qui chantait dans son cœur...\" Mais cette bouche ne chantait plus... elle n'osait plus une parole, plus un son..."
+  },
+  {
+   "id": "cal_fr03",
+   "language": "french",
+   "tag": "audiobook",
+   "voice": "samples/Adam.mp3",
+   "text": "TYBALT.--Il sied très-bien quand un pareil traître devient votre convive: je ne le souffrirai pas."
+  },
+  {
+   "id": "cal_sp00",
+   "language": "spanish",
+   "tag": "audiobook",
+   "voice": "samples/Diego.mp3",
+   "text": "Aquella herida le tuvo más de un mes con calentura y sin salir de casa; no quiso ver á ningún médico, y cuando Cosette le instaba, le decía: \"Llama al médico de los perros\"."
+  },
+  {
+   "id": "cal_sp01",
+   "language": "spanish",
+   "tag": "audiobook",
+   "voice": "samples/Luis.mp3",
+   "text": "--¿Que cómo llegaron a su poder?--exclamó Razumikin--. ¿Que cómo llegaron a su poder? Ante todo, doctor, por tu condición de médico has tenido ocasión de estudiar al hombre y profundizar la naturaleza humana. Hacía el traidor que sus lágrimas acreditasen sus palabras y los suspiros su intención."
+  },
+  {
+   "id": "cal_sp02",
+   "language": "spanish",
+   "tag": "audiobook",
+   "voice": "samples/Diego.mp3",
+   "text": "Y es el tal león un símbolo de origen lingüístico, como tantos otros lo son. (¿Quién no recuerda los estudios de Max Müller sobre el origen puramente lingüístico de tantos mitos?"
+  },
+  {
+   "id": "cal_sp03",
+   "language": "spanish",
+   "tag": "audiobook",
+   "voice": "samples/Luis.mp3",
+   "text": "¿Crees tú que debían poner en libertad a ese pintor decorador?"
+  },
+  {
+   "id": "cal_it00",
+   "language": "italian",
+   "tag": "audiobook",
+   "voice": "samples/Roberto.mp3",
+   "text": "Garibaldi andava innanzi pallido e biondo."
+  },
+  {
+   "id": "cal_it01",
+   "language": "italian",
+   "tag": "audiobook",
+   "voice": "samples/Andrea.mp3",
+   "text": "E un che 'ntese la parola tosca, di retro a noi gridò: \"Tenete i piedi, voi che correte sì per l'aura fosca! Forse ch'avrai da me quel che tu chiedi\"."
+  },
+  {
+   "id": "cal_it02",
+   "language": "italian",
+   "tag": "audiobook",
+   "voice": "samples/Roberto.mp3",
+   "text": "Che cosa era avvenuto di Mazzini? Garibaldi era forse prigioniero? Un fascino misterioso circondava quest'uomo rendendolo superiore a tutte le circostanze. Mazzini esulava, Garibaldi si ritirava, nessuno dei due fuggiva."
+  },
+  {
+   "id": "cal_it03",
+   "language": "italian",
+   "tag": "audiobook",
+   "voice": "samples/Andrea.mp3",
+   "text": "Ma avrebbe avuto bisogno di tutt'altro uomo che del dabben Costanzo, per tentar quel volo a cui si credeva creato."
+  },
+  {
+   "id": "cal_du00",
+   "language": "dutch",
+   "tag": "audiobook",
+   "voice": "samples/Lars.mp3",
+   "text": "De zon werd met een dicht floers overtrokken, zware wolken pakten zich samen aan den hemel, en ontlastten zich weldra in een vreeselijk onweder. Aan alle kanten zag ik den bliksem flitsen en het doffe gerommel van den donder vervulde de lucht."
+  },
+  {
+   "id": "cal_du01",
+   "language": "dutch",
+   "tag": "audiobook",
+   "voice": "samples/Lotte.mp3",
+   "text": "\"Als er soldaten moeten opkomen, leen ik de mijne!\" zeide de kapitein der \"cuadrillero's\". als er soms een grijsaard noodig is...\" stamelde een ander, en richtte zich met majesteit op."
+  },
+  {
+   "id": "cal_du02",
+   "language": "dutch",
+   "tag": "audiobook",
+   "voice": "samples/Lars.mp3",
+   "text": "Vol gespannen verwachting schepte ik met behulp van den schotel eenig water uit de bron en sprenkelde toen met de hand enkele druppels op den steen. De uitwerking was vreeselijk."
+  },
+  {
+   "id": "cal_du03",
+   "language": "dutch",
+   "tag": "audiobook",
+   "voice": "samples/Lotte.mp3",
+   "text": "Het is een heel aardige familie, Edward, en ze zijn voor ons allervriendelijkst geweest."
+  },
+  {
+   "id": "cal_po00",
+   "language": "portuguese",
+   "tag": "audiobook",
+   "voice": "samples/Martim.mp3",
+   "text": "Porque êle não encontrava aqui, nesta luz crua, nestes mamelões adustos, a vegetação suave e amiga, as delicadas e múltiplas nuanças, o brando afago, as acariciadoras sombras do torrão bemdito que lhe embalára a infância."
+  },
+  {
+   "id": "cal_po01",
+   "language": "portuguese",
+   "tag": "audiobook",
+   "voice": "samples/Tiago.mp3",
+   "text": "E até manda perguntar se V. Ex.^a deseja para o almoço vinho verde de Amarante, de Vidainhos. --Oh Padre Sueiro, previna este escudeiro novo que eu não tenho Dom. Sou simplesmente Gonçalo, graças a Deus!"
+  },
+  {
+   "id": "cal_po02",
+   "language": "portuguese",
+   "tag": "audiobook",
+   "voice": "samples/Martim.mp3",
+   "text": "Eu proprio e o barão ficámos surprezos:--e o nosso assombro cresceu quando avistámos John, apparentemente montado n'um potro, fugindo aos galões para o lado dos montes, e ganindo como um desesperado."
+  },
+  {
+   "id": "cal_po03",
+   "language": "portuguese",
+   "tag": "audiobook",
+   "voice": "samples/Tiago.mp3",
+   "text": "Quem tem a culpa de não haver obras publicas no Brazil? Os negros atiraram-se ao chão, gritando que eram \"demonios acordados\"!"
+  }
+ ]
+}

@@ -78,8 +78,8 @@ async def test_batched_staircase_keeps_layout_when_any_step_has_64_frames(length
     engine._process_batch([(frames, slot, future)
                            for slot, (frames, future) in enumerate(zip(inputs, futures))])
     for frames, future in zip(inputs, futures):
-        # Existing batched worker converts to bfloat16.
-        expected = frames.to(torch.bfloat16).float()[:, :, 0].unsqueeze(1)
+        # The batched worker decodes in the tokenizer's dtype (fp32 here, as on the CPU).
+        expected = frames.to(model._tontaube_dtype).float()[:, :, 0].unsqueeze(1)
         torch.testing.assert_close(future.result(), expected)
     assert all(call[0].shape[1] == 64 for call in model.calls)
 

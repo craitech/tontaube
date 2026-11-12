@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import sys
+import warnings
 from collections.abc import Sequence
 
 
@@ -45,10 +48,30 @@ def _parser() -> argparse.ArgumentParser:
         help="download, prepare, and validate enabled models without starting the API",
     )
 
+    quantize = commands.add_parser(
+        "quantize",
+        help="build a pre-quantized bundle for the lite backend (TTS_BACKEND=lite)",
+        add_help=False,
+    )
+    quantize.add_argument("args", nargs=argparse.REMAINDER, help="see `tontaube quantize --help`")
+
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Known noise from dependencies: SyntaxWarnings on their first import under Python 3.12, torch's weight_norm
+    # deprecation, and the bundled VibeVoice code's notice that the optional APEX package is absent.
+    warnings.filterwarnings("ignore", category=SyntaxWarning)
+    warnings.filterwarnings("ignore", message=".*weight_norm", category=FutureWarning)
+    logging.getLogger("VibeVoice.vibevoice.modular.modular_vibevoice_tokenizer").setLevel(logging.ERROR)
+    if argv[:1] == ["quantize"]:
+        # The quantizer owns its options (argparse REMAINDER cannot pass
+        # leading options such as --help through a subparser).
+        from app.lite.quantize.cli import main as quantize_main
+
+        quantize_main(argv[1:])
+        return
     parser = _parser()
     args = parser.parse_args(argv)
 
@@ -56,6 +79,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.print_help()
         return
     if args.command == "serve":
+        # Before anything imports torch models or downloads weights: a GPU that the
+        # installed PyTorch build does not support is handled here, not after minutes
+        # of downloads (see app/torch_variant.py). `preflight` does not touch the GPU.
+        from app.torch_variant import check_torch_variant
+
+        check_torch_variant(argv)
+
         from app.main import main as serve_main
 
         serve_main(host=args.host, port=args.port)

@@ -27,8 +27,7 @@ class TestTagRegex:
 @pytest.fixture
 def mock_verbalizer():
     """Create a Verbalizer with mocked engine, only testing verbalize() logic."""
-    with patch("app.verbalizer.AsyncLLMEngine"), \
-         patch("app.verbalizer.AutoTokenizer"):
+    with patch("app.verbalizer.AutoTokenizer"):
         from app.verbalizer import Verbalizer
         v = MagicMock(spec=Verbalizer)
         v.verbalize = Verbalizer.verbalize.__get__(v, Verbalizer)
@@ -67,3 +66,13 @@ async def test_verbalize_whitespace_between_tags_not_verbalized(mock_verbalizer)
     # " " is whitespace-only, so not verbalized, just preserved
     assert result == "<<moan>> <<gasp>>"
     mock_verbalizer._verbalize_plain.assert_not_called()
+
+
+def test_lite_verbalizer_without_a_gpu_fails_with_a_clear_error(monkeypatch):
+    import torch
+
+    from app.engines import build_verbalizer_engine
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="ENABLE_VERBALIZATION"):
+        build_verbalizer_engine("lite", "unused", 128, 1, 0.18, "int8g128")

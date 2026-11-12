@@ -1,6 +1,6 @@
-"""Tests asserting assumptions from InputScheme_formal.md.
+"""Tests asserting the assumptions of the formal input scheme (token layout, markers, row construction).
 
-Each test references the relevant section/equation from the formal spec.
+Each test references the relevant property/equation of the scheme.
 """
 import pytest
 
@@ -22,7 +22,7 @@ AUDIO_MARKER_ID = 151664
 
 
 # ---------------------------------------------------------------------------
-# §Properties — codebook offset layout
+# Properties — codebook offset layout
 # ---------------------------------------------------------------------------
 
 class TestCodebookOffset:

@@ -19,3 +19,12 @@ _MOCK_MODULES = [
 ]
 for mod in _MOCK_MODULES:
     sys.modules.setdefault(mod, MagicMock())
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_torch_variant_switch(monkeypatch):
+    """Tests that run `cli.main(["serve"])` must never probe the GPU or re-exec into uv."""
+    monkeypatch.setenv("TONTAUBE_TORCH_VARIANT", "default")

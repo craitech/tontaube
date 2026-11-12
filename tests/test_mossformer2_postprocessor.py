@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -64,12 +66,14 @@ async def test_predict_trims_before_mossformer_and_returns_48khz(monkeypatch):
     class Engine:
         verbalizer = None
         vv_tokenizer = None
+        config = SimpleNamespace(output_headroom_db=0.0)
 
         async def generate(self, **_kwargs):
             return generated, [[1]]
 
     class Postprocessor:
-        def process(self, audio, input_sample_rate):
+        def process(self, audio, input_sample_rate, *, headroom_db):
+            observed["postprocess_headroom_db"] = headroom_db
             observed["postprocess_input_samples"] = audio.shape[-1]
             observed["postprocess_input_rate"] = input_sample_rate
             return audio.repeat_interleave(2, dim=-1)
@@ -97,6 +101,7 @@ async def test_predict_trims_before_mossformer_and_returns_48khz(monkeypatch):
 
     assert observed["postprocess_input_samples"] < generated.shape[-1]
     assert observed["postprocess_input_rate"] == 24_000
+    assert observed["postprocess_headroom_db"] == 0.0
     assert observed["encoded_samples"] == 2 * observed["postprocess_input_samples"]
     assert observed["encoded_rate"] == 48_000
     assert result["sample_rate"] == 48_000

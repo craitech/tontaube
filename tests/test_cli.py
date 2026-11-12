@@ -10,7 +10,7 @@ from app import cli
 def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     cli.main([])
     output = capsys.readouterr().out
-    assert "{serve,ui,preflight}" in output
+    assert "{serve,ui,preflight,quantize}" in output
 
 
 def test_serve_routes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,3 +50,16 @@ def test_preflight_routes_command(monkeypatch: pytest.MonkeyPatch) -> None:
     cli.main(["preflight"])
 
     assert calls == [True]
+
+
+def test_lite_is_the_default_backend():
+    import os
+    import subprocess
+    import sys
+
+    code = "import app.config as c, app.model_sources as m; print(c.TTS_BACKEND, m.DEFAULT_MODEL_REPO_ID)"
+    env = {k: v for k, v in os.environ.items() if k != "TTS_BACKEND"}
+    run = lambda env: subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,  # noqa: E731
+                                     text=True, check=True).stdout.split()
+    assert run(env) == ["lite", "TontaubeAI/TontaubeV1.1-int4"]
+    assert run({**env, "TTS_BACKEND": "vllm"}) == ["vllm", "TontaubeAI/TontaubeV1.1"]

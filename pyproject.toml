@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tontaube-inference"
-version = "1.0.0"
-description = "vLLM inference server for Tontaube text-to-speech"
+version = "1.1.0"
+description = "Inference server for Tontaube text-to-speech"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dynamic = ["dependencies"]
@@ -13,6 +13,17 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "VibeVoice/LICENSE", "voices/LICENSE"]
 
 [project.optional-dependencies]
+# Torch builds. These extras only select where torch, torchaudio and torchvision
+# come from (see [tool.uv.sources]); the versions match requirements.txt and uv.lock.
+# A plain install uses the PyPI build. "cu126" is the CUDA 12.6 build for GPUs that
+# the PyPI build no longer supports (Pascal and older). "default" exists only so uv
+# can declare the two builds as mutually exclusive; it adds nothing.
+default = []
+cu126 = [
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    "torchvision==0.24.1",
+]
 dev = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.24,<2",
@@ -35,6 +46,10 @@ app = [
     "ui/*.js",
     "ui/*.png",
     "third_party/clearvoice_mossformer2_sr/LICENSE",
+    "cb0_rate_window_factors.json",
+    "lite/quantize/calibration_texts.json",
+    "native/*.cpp",
+    "native/*.h",
 ]
 voices = [
     "LICENSE",
@@ -59,3 +74,16 @@ constraint-dependencies = [
 override-dependencies = [
     "protobuf>=6.33.5,<7",
 ]
+conflicts = [
+    [{ extra = "default" }, { extra = "cu126" }],
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", extra = "cu126" }]
+torchaudio = [{ index = "pytorch-cu126", extra = "cu126" }]
+torchvision = [{ index = "pytorch-cu126", extra = "cu126" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

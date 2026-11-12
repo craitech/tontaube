@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.config import ServerConfig, COLLAPSE_SILENCE_TOKEN_IDS
+from app.cb0_guard import retry_seed
 from app.inference import TTSEngine
 
 
@@ -14,6 +15,19 @@ def test_new_cps_boundaries(characters, passes):
     assert (reason is None) == passes
     if not passes:
         assert reason.startswith('cps_out_of_range')
+
+
+@pytest.mark.parametrize('tag, limit', [
+    ('<|im_start|>english : audiobook<|im_end|>\n', 20.0),
+    ('<|im_start|>english : conversational<|im_end|>\n', 24.0),
+    ('<|im_start|>german : agentic<|ctrl_rate_02|><|im_end|>\n', 24.0),
+    ('', 20.0),
+])
+def test_max_cps_by_style(tag, limit):
+    engine = TTSEngine(ServerConfig())
+    assert engine._cb0_max_cps(tag) == limit
+    # 100 tokens at 12.5 Hz = 8 s: 180 chars = 22.5 chars/s
+    assert (engine._check_cb0_generation(100, 180, False, 12.5, max_cps=limit) is None) == (limit == 24.0)
 
 
 def test_early_stream_prefix_still_skips_cps_check():
@@ -46,4 +60,6 @@ async def test_retry_temperature_steps_and_resets_without_mutating_sampling(base
     assert [p.temperature for p in params] == pytest.approx(
         [base, base, base + 0.05, base + 0.10, base + 0.15, base])
     assert sampling == original
-    assert all(p.top_p == 0.95 and p.top_k == 50 and p.seed == 123 for p in params)
+    assert all(p.top_p == 0.95 and p.top_k == 50 for p in params)
+    # guard fix: one seed per attempt, the request seed on attempt 1, reset per segment
+    assert [p.seed for p in params] == [retry_seed(123, k) for k in (1, 2, 3, 4, 5, 1)]

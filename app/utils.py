@@ -3,6 +3,8 @@ import base64
 import gc
 import hashlib
 import io
+import json
+import math
 import os
 import re
 import tempfile
@@ -19,8 +21,12 @@ from app.config import (
     END_OF_SPEECH,
     TEXT_MARKER,
     AUDIO_MARKER,
+    BOUNDARY_TOKENS,
+    BOUNDARY_TOKENS_FILENAME,
+    VOICE_REF_LEVEL_WINDOW,
 )
 from app.logging_utils import get_logger
+from app.model.text_vocab import char_token_id, clean_text, is_model_token
 
 logger = get_logger("audio")
 
@@ -36,6 +42,58 @@ def free_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+    elif _LIBC is not None:
+        _LIBC.malloc_trim(0)  # hand freed heap (encode/decode activations) back to the OS
+
+
+def _load_libc():
+    import ctypes
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim  # glibc only
+        return libc
+    except (OSError, AttributeError):
+        return None
+
+
+_LIBC = _load_libc()
+
+
+def release_mapped_weights(module: torch.nn.Module) -> int:
+    """Drop the resident pages of a module's file-mapped CPU weights (Linux).
+
+    Weights loaded from safetensors on the CPU are private file mappings. While
+    no page of a mapping has been written (no anonymous pages), dropping its
+    pages is lossless: the next access re-reads them from the page cache.
+    Returns the number of bytes released.
+    """
+    ptrs = [p.data_ptr() for p in module.parameters() if p.device.type == "cpu" and p.numel()]
+    if not ptrs or _LIBC is None or not os.path.exists("/proc/self/smaps"):
+        return 0
+    import ctypes
+
+    mappings, cur = [], None
+    with open("/proc/self/smaps") as fh:
+        for line in fh:
+            head = line.split()
+            if "-" in head[0] and len(head) >= 5 and not head[0].endswith(":"):
+                lo, hi = (int(x, 16) for x in head[0].split("-"))
+                cur = [lo, hi, len(head) >= 6 and head[5].startswith("/"), None]
+                mappings.append(cur)
+            elif head[0] == "Anonymous:" and cur is not None:
+                cur[3] = int(head[1])
+    madvise = _LIBC.madvise
+    madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    released = 0
+    for lo, hi, is_file, anon_kb in mappings:
+        if is_file and anon_kb == 0 and any(lo <= ptr < hi for ptr in ptrs):
+            if madvise(lo, hi - lo, 4) == 0:  # MADV_DONTNEED
+                released += hi - lo
+    return released
 
 
 def get_dc_inference(
@@ -69,7 +127,64 @@ def load_and_prep_audio(audio_path: str, target_sr: int = DUALCODEC_SAMPLE_RATE)
     return wav.unsqueeze(0).to("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def gated_level_db(audio: torch.Tensor, sample_rate: int = DUALCODEC_SAMPLE_RATE) -> float:
+    """Speech level in dB: BS.1770-style gating of 400 ms blocks (no frequency weighting), so pauses do not count."""
+    x = audio.reshape(-1).float()
+    block, hop = int(0.4 * sample_rate), int(0.1 * sample_rate)
+    if x.numel() < block:
+        return 10 * math.log10(float(x.pow(2).mean()) + 1e-12)
+    energy = x.unfold(0, block, hop).pow(2).mean(dim=1)
+    energy = energy[energy > 1e-7]
+    if energy.numel() == 0:
+        return -99.0
+    gated = energy[energy > energy.mean() * 0.1]
+    return 10 * math.log10(float(gated.mean()) + 1e-12)
+
+
+def fit_reference_level(
+    audio: torch.Tensor,
+    window: tuple[float, float] | None = VOICE_REF_LEVEL_WINDOW,
+    peak_db: float = -1.0,
+    sample_rate: int = DUALCODEC_SAMPLE_RATE,
+) -> torch.Tensor:
+    """Scale a reference whose level lies outside ``window`` (low, high dB) to the nearer edge, peak <= ``peak_db``."""
+    if window is None:
+        return audio
+    level = gated_level_db(audio, sample_rate)
+    low, high = window
+    if low <= level <= high:
+        return audio
+    gain_db = (low if level < low else high) - level
+    peak = float(audio.abs().max())
+    if peak > 0:
+        gain_db = min(gain_db, peak_db - 20 * math.log10(peak))
+    return audio * 10 ** (gain_db / 20)
+
+
 _SAMPLES_PER_TOKEN = 1920  # DualCodec: 24000 Hz / 12.5 Hz
+
+
+def dc_encode(dc_inference, audio: torch.Tensor, n_quantizers: int):
+    """DualCodec encode; on the CPU without its hard-coded fp16 autocast.
+
+    `dualcodec.Inference.encode` always runs W2V-BERT under fp16 autocast.
+    CPUs without native fp16 arithmetic execute that on a slow emulation path
+    (minutes per reference), so the CPU path repeats the same steps in fp32.
+    """
+    if torch.device(dc_inference.device).type != "cpu":
+        return dc_inference.encode(audio, n_quantizers=n_quantizers)
+    audio = audio.cpu()
+    audio_16k = torchaudio.functional.resample(audio, 24000, 16000)
+    inputs = dc_inference.semantic_cfg.feature_extractor(
+        audio_16k[0].cpu(), sampling_rate=16000, return_tensors="pt"
+    )
+    with torch.inference_mode():
+        feat = dc_inference._extract_semantic_code(
+            inputs["input_features"], inputs["attention_mask"]
+        ).transpose(1, 2)
+        factor = dc_inference.model.semantic_downsample_factor
+        feat = torch.nn.functional.avg_pool1d(feat, factor, factor)
+        return dc_inference.model.encode(audio, num_quantizers=n_quantizers, semantic_repr=feat)
 
 
 def _encode_chunked(
@@ -89,7 +204,7 @@ def _encode_chunked(
         chunk_end = min(n_samples, main_end + pad_samples)
         chunk = audio[:, :, chunk_start:chunk_end]
 
-        sem, aco = dc_inference.encode(chunk, n_quantizers=n_codebooks)
+        sem, aco = dc_encode(dc_inference, chunk, n_codebooks)
 
         left_pad_tok = (main_start - chunk_start) // _SAMPLES_PER_TOKEN
         main_tok = (main_end - main_start) // _SAMPLES_PER_TOKEN
@@ -116,12 +231,13 @@ def encode_voice_prompt(
     audio = load_and_prep_audio(prompt_path)
     if prompt_seconds:
         audio = audio[..., :int(prompt_seconds * DUALCODEC_SAMPLE_RATE)]
+    audio = fit_reference_level(audio)
 
     max_samples_direct = 30 * DUALCODEC_SAMPLE_RATE  # 30s fits in one encode call
     if audio.shape[-1] > max_samples_direct:
         semantic_codes, acoustic_codes = _encode_chunked(dc_inference, audio, n_codebooks)
     else:
-        semantic_codes, acoustic_codes = dc_inference.encode(audio, n_quantizers=n_codebooks)
+        semantic_codes, acoustic_codes = dc_encode(dc_inference, audio, n_codebooks)
 
     semantic_list = semantic_codes[0, 0, :].cpu().tolist()
     acoustic_lists = (
@@ -139,6 +255,10 @@ def encode_voice_prompt(
             acoustic_lists = [ac[:prompt_max_tokens] for ac in acoustic_lists]
 
     logger.debug("Encoded %d voice-prompt tokens from %s", len(semantic_list), prompt_path)
+    semantic_model = dc_inference.semantic_cfg.get("semantic_model")
+    if semantic_model is not None and torch.device(dc_inference.device).type == "cpu":
+        # W2V-BERT is only needed for new voices: leave its weights in the page cache.
+        release_mapped_weights(semantic_model)
     return semantic_list, acoustic_lists
 
 
@@ -183,14 +303,107 @@ def load_tokenizer(model_path: str):
     return tokenizer
 
 
+def _safetensors_shape(model_path: str, key: str) -> list[int] | None:
+    """Shape of ``key`` from the bundle's safetensors header(s), without loading weights; None if absent."""
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path) as f:
+            filename = json.load(f).get("weight_map", {}).get(key)
+        if filename is None:
+            return None
+    else:
+        filename = "model.safetensors"
+    path = os.path.join(model_path, filename)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        header = json.loads(f.read(int.from_bytes(f.read(8), "little")))
+    entry = header.get(key)
+    return None if entry is None else list(entry["shape"])
+
+
+def check_boundary_tokens(
+    model_path: str,
+    tokenizer,
+    codebook: int,
+    slider_tokens=(),
+) -> tuple[int, int] | None:
+    """Boundary tokens: a bundle's tokenizer carries <|utt_end|> /
+    <|utt_cont|> iff the bundle declares them in boundary_tokens.json: CB0 only, ids right after the slider
+    tokens and last in the tokenizer, rows in config.json's vocab and the token table. Returns their ids for a
+    declaring bundle, None for a legacy one (fails closed on anything in between). tokenize_text silently drops
+    an unknown <|...|>, so the token window flag is refused for a bundle without the rows (by the caller)."""
+    vocab = tokenizer.get_vocab()
+    known = [token for token in BOUNDARY_TOKENS if token in vocab]
+    decl_path = os.path.join(model_path, BOUNDARY_TOKENS_FILENAME)
+    if not os.path.isfile(decl_path):
+        if known:
+            raise ValueError(
+                f"{model_path}: tokenizer carries {known} but the bundle has no {BOUNDARY_TOKENS_FILENAME}"
+            )
+        return None
+    with open(decl_path) as f:
+        decl = json.load(f)
+    if codebook != 0 or decl.get("codebooks") != ["cb0"]:
+        raise ValueError(
+            f"{decl_path}: boundary tokens are CB0-only (codebooks {decl.get('codebooks')}, loaded as cb{codebook})"
+        )
+    if decl.get("tokens") != list(BOUNDARY_TOKENS):
+        raise ValueError(f"{decl_path}: tokens {decl.get('tokens')} != {list(BOUNDARY_TOKENS)}")
+    ids = [vocab.get(token) for token in BOUNDARY_TOKENS]
+    if len(known) != len(BOUNDARY_TOKENS) or ids != decl.get("ids") or ids[1] != ids[0] + 1:
+        raise ValueError(f"{model_path}: tokenizer ids of {list(BOUNDARY_TOKENS)} = {ids}, declared {decl.get('ids')}")
+    if len(tokenizer) != ids[1] + 1:
+        raise ValueError(f"{model_path}: tokenizer has {len(tokenizer)} tokens; the boundary tokens must be the last two")
+    slider_ids = [vocab[token] for token in slider_tokens]
+    if slider_ids and max(slider_ids) + 1 != ids[0]:
+        raise ValueError(f"{model_path}: boundary ids {ids} do not follow the last slider id {max(slider_ids)}")
+    with open(os.path.join(model_path, "config.json")) as f:
+        vocab_size = json.load(f).get("vocab_size")
+    if vocab_size != len(tokenizer):
+        raise ValueError(f"{model_path}: config.json vocab_size {vocab_size} != tokenizer {len(tokenizer)}")
+    table = _safetensors_shape(model_path, "model.embed_tokens.weight")
+    if table is None or table[0] != len(tokenizer):
+        raise ValueError(f"{model_path}: token table shape {table} has no rows for the boundary ids {ids}")
+    return ids[0], ids[1]
+
+
+def check_cb0_window_ids(
+    text: str,
+    ids: list[int],
+    boundary_ids: tuple[int, int] | None,
+    token_window: bool,
+) -> None:
+    """Fail closed when a CB0 window's boundary tokens did not reach the model as their ids (tokenize_text drops an
+    unknown <|...|>): a token window carries exactly one, a legacy window on a declaring bundle none. A legacy window
+    on a legacy bundle is not checked (unchanged)."""
+    if boundary_ids is None and not token_window:
+        return
+    expected = 1 if token_window else 0
+    n_text = sum(text.count(token) for token in BOUNDARY_TOKENS)
+    n_ids = 0 if boundary_ids is None else sum(1 for i in ids if i in boundary_ids)
+    if n_text != expected or n_ids != expected:
+        raise ValueError(
+            f"CB0 window must carry {expected} boundary token(s): {n_text} in the text, {n_ids} in the ids "
+            f"(boundary ids {boundary_ids})"
+        )
+
+
 _char_token_cache = {}
 
 
 def tokenize_text(text: str, tokenizer) -> list[int]:
+    """Training input scheme: one token per character, BPE only inside the system prompt.
+
+    Only rows the models were trained on are produced (app/model/text_vocab.py):
+    other <|...|> tokens, <<tags>> and "||" are dropped and characters are cleaned.
+    """
     result = []
     in_im_block = False
     for part in _SPECIAL_TOKEN_RE.split(text):
         if part.startswith('<|') and part.endswith('|>'):
+            if not is_model_token(part):
+                continue
             tid = tokenizer.convert_tokens_to_ids(part)
             if tid is not None and tid != tokenizer.unk_token_id:
                 result.append(tid)
@@ -198,12 +411,14 @@ def tokenize_text(text: str, tokenizer) -> list[int]:
                 in_im_block = True
             elif part == '<|im_end|>':
                 in_im_block = False
-        elif part.startswith('<<') and part.endswith('>>') or part == '||' or in_im_block:
+        elif part.startswith('<<') and part.endswith('>>') or part == '||':
+            continue
+        elif in_im_block:
             result.extend(tokenizer.encode(part, add_special_tokens=False))
         else:
-            for char in part:
+            for char in clean_text(part):
                 if char not in _char_token_cache:
-                    _char_token_cache[char] = tokenizer(char)['input_ids'][0]
+                    _char_token_cache[char] = char_token_id(tokenizer, char)
                 result.append(_char_token_cache[char])
     return result
 

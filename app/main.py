@@ -23,6 +23,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.config import (
     ACOUSTIC_VOCAB_SIZE,
+    MOSSFORMER2_POSTPROCESS_DEFAULT,
     DEFAULT_LANGUAGE,
     DEFAULT_TAG,
     DEFAULT_STREAMING_INITIAL_SECONDS,
@@ -36,6 +37,9 @@ from app.config import (
     MAX_TEXT_CHARS_PER_CHUNK,
     MAX_VOICE_PROMPT_TOKENS,
     MAX_VOICE_REFERENCE_B64_CHARS,
+    MERGE_SHORT_CLIENT_SEGMENTS,
+    MERGE_SHORT_PIECES,
+    NO_SHORT_FINAL_SENTENCE,
     SEMANTIC_VOCAB_SIZE,
     MIN_STREAMING_INITIAL_SECONDS,
     STREAMING_DC_PAD_TOKENS,
@@ -47,7 +51,13 @@ from app.config import (
 )
 from app.priority_gate import get_gate
 from app.logging_utils import get_logger
-from app.text import sanitize_text_for_tts, split_long_text
+from app.model.text_vocab import clean_text, strip_markup, strip_separators
+from app.text import (
+    MAX_MERGED_PIECE_CHARS,
+    merge_short_pieces,
+    sanitize_text_for_tts,
+    split_long_text,
+)
 from app.utils import VoicePromptError
 
 logger = get_logger("api")
@@ -79,6 +89,12 @@ def _ensure_punctuation(text: str) -> str:
 
 
 def _prepare_raw_text(text: str | list[str]) -> str | list[str]:
+    segments = text if isinstance(text, list) else [text]
+    if not any(char.isalnum() for segment in segments for char in clean_text(strip_separators(strip_markup(segment)))):
+        raise TTSRequestOptionError(
+            "text contains no characters the model can read (Latin-script letters of the "
+            "supported languages, digits and common punctuation)"
+        )
     if isinstance(text, list):
         prepared = list(text)
         prepared[-1] = _ensure_punctuation(prepared[-1])
@@ -91,8 +107,16 @@ def _trim_boundary_silence(
     *,
     padding_ms: int,
     silence_threshold_dbfs: float = -50.0,
+    headroom_db: float = 0.0,
+    lead_padding_ms: int | None = None,
 ):
-    """Trim excess edge silence while preserving all internal pauses."""
+    """Trim excess edge silence while preserving all internal pauses.
+
+    silence_threshold_dbfs is at the decoder's own level. For audio already
+    scaled by OUTPUT_HEADROOM_DB, pass that headroom: the threshold moves
+    down by the same dB, so the trim points do not depend on the headroom.
+    headroom_db=0 is the old threshold.
+    """
     if padding_ms < 0 or audio.shape[-1] == 0:
         return audio
 
@@ -104,7 +128,7 @@ def _trim_boundary_silence(
         return audio
 
     frame_rms = mono_power.unfold(0, frame_samples, hop_samples).mean(dim=-1).sqrt()
-    threshold = 10.0 ** (silence_threshold_dbfs / 20.0)
+    threshold = 10.0 ** ((silence_threshold_dbfs - headroom_db) / 20.0)
     active_frames = (frame_rms >= threshold).nonzero(as_tuple=False).flatten()
     if active_frames.numel() == 0:
         return audio
@@ -118,7 +142,8 @@ def _trim_boundary_silence(
     covered = (len(frame_rms) - 1) * hop_samples + frame_samples
     if covered < mono_power.numel() and mono_power[covered:].mean().sqrt() >= threshold:
         last_sample = mono_power.numel()
-    start = max(0, first_sample - padding_samples)
+    lead_samples = padding_samples if lead_padding_ms is None else round(DUALCODEC_SAMPLE_RATE * max(0, lead_padding_ms) / 1000)
+    start = max(0, first_sample - lead_samples)
     end = min(audio.shape[-1], last_sample + padding_samples)
     return audio[..., start:end]
 
@@ -150,14 +175,20 @@ def _encode_audio(
     return encoded.getvalue(), mime_type
 
 
-def _apply_mossformer2_postprocessing(audio, input_sample_rate: int):
-    """Load and run the optional enhancer outside the async event loop."""
+def _apply_mossformer2_postprocessing(audio, input_sample_rate: int, *, headroom_db: float = 0.0):
+    """Load and run the optional enhancer outside the async event loop.
+
+    headroom_db: the OUTPUT_HEADROOM_DB already applied to `audio`; the pause
+    cap lowers its fixed thresholds by it.
+    """
     from app.mossformer2_postprocessor import (
         MOSSFORMER2_SAMPLE_RATE,
         get_mossformer2_postprocessor,
     )
 
-    enhanced = get_mossformer2_postprocessor().process(audio, input_sample_rate)
+    enhanced = get_mossformer2_postprocessor().process(
+        audio, input_sample_rate, headroom_db=headroom_db,
+    )
     return enhanced, MOSSFORMER2_SAMPLE_RATE
 
 
@@ -196,18 +227,20 @@ class TTSRequest(BaseModel):
                 f'text must contain at most {MAX_REQUEST_TEXT_CHARS} characters'
             )
         return v
-    temperature: float = Field(
-        default=0.8,
+    temperature: float | None = Field(
+        default=None,
         ge=0,
         le=2,
         description=(
-            "CB0 sampling temperature. The 0.8 default favors expression; "
-            "0.6 is a more conservative choice for correctness."
+            "CB0 sampling temperature; omitted = server default 0.7. Lower favors "
+            "correctness, higher expression."
         ),
     )
     top_p: float | None = Field(default=None, gt=0, le=1)
     top_k: int | None = Field(default=None, ge=-1)
-    frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
+    frequency_penalty: float | None = Field(
+        default=None, ge=-2, le=2, description="CB0 frequency penalty; omitted = server default 0.1.",
+    )
     silence_logit_bias: float | None = Field(
         default=None,
         ge=-10,
@@ -284,11 +317,12 @@ class TTSRequest(BaseModel):
         ),
     )
     mossformer2_postprocess: bool = Field(
-        default=True,
+        default=MOSSFORMER2_POSTPROCESS_DEFAULT,
         description=(
             "Cap quiet pauses at 2.5 seconds, then apply hybrid MossFormer2_SR_48K "
             "super-resolution after optional boundary trimming. Enabled by default "
-            "for non-streaming requests; "
+            "for non-streaming requests unless the server sets "
+            "MOSSFORMER2_POSTPROCESS_DEFAULT=0 (the default for the lite backend on CPU); "
             "set false to return the original 24 kHz output."
         ),
     )
@@ -309,6 +343,30 @@ class TTSRequest(BaseModel):
             "Streaming callers should use priority instead."
         ),
     )
+    # Slider controls of a control-enabled CB0 bundle (app/controls.py).
+    controls: dict[str, int] | str | None = Field(
+        default=None,
+        description=(
+            "Style sliders: {name: bin}, bin 0 (low end) to bins-1 (high end); a slider left out keeps the "
+            "model's choice. GET /controls lists the sliders. A control-token string is accepted too."
+        ),
+        examples=[{"rate": 1, "pitch_range": 4}],
+    )
+    segment_controls: list[dict[str, int | None] | str | None] | None = Field(
+        default=None,
+        description=(
+            "Per-segment sliders aligned with a list `text`, merged over `controls` "
+            "(a null value drops that control for the segment)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def segment_controls_aligned(self):
+        if self.segment_controls is not None and (
+            not isinstance(self.text, list) or len(self.segment_controls) != len(self.text)
+        ):
+            raise ValueError("segment_controls needs a list text with one entry per segment")
+        return self
 
     @field_validator("language")
     @classmethod
@@ -433,6 +491,82 @@ def _require_verbalizer(req: TTSRequest, engine) -> None:
         )
 
 
+def _scaled_chars(limit: int, scale: float) -> int:
+    return max(1, round(limit * scale))
+
+
+def _split_with_controls(
+    text, segment_controls, digit_weight: int = 1, chunk_scales: list[float] | None = None,
+):
+    """split_long_text keeping segment_controls aligned: pieces inherit their segment's entry.
+
+    Then pieces under 50 chars join a neighbour (merge_short_pieces):
+    pieces split from the same text with MERGE_SHORT_PIECES; across client segments whose
+    segment_controls entries are identical with MERGE_SHORT_CLIENT_SEGMENTS (both opt-in).
+    ``chunk_scales`` (one per segment, TTSEngine.chunk_char_scales) scale each segment's split
+    length and merge limit. NO_SHORT_FINAL_SENTENCE (on by default) keeps the splitter and the
+    merge from ending a piece on a 1-2-word sentence (app/text.py).
+    """
+    scales = chunk_scales or [1.0] * (1 if isinstance(text, str) else len(text))
+    if isinstance(text, str):
+        pieces = split_long_text(
+            text, max_chars=_scaled_chars(MAX_TEXT_CHARS_PER_CHUNK, scales[0]),
+            digit_weight=digit_weight, avoid_short_final=NO_SHORT_FINAL_SENTENCE,
+        )
+        if isinstance(pieces, str) or not (MERGE_SHORT_PIECES or MERGE_SHORT_CLIENT_SEGMENTS):
+            return pieces, None
+        pieces, _ = merge_short_pieces(
+            pieces, max_chars=_scaled_chars(MAX_MERGED_PIECE_CHARS, scales[0]),
+            digit_weight=digit_weight, avoid_short_final=NO_SHORT_FINAL_SENTENCE,
+        )
+        return (pieces[0] if len(pieces) == 1 else pieces), None
+    entries = segment_controls if segment_controls is not None else [None] * len(text)
+    pieces, controls, origins, limits = [], [], [], []
+    for index, (segment, value, scale) in enumerate(zip(text, entries, scales)):
+        split = split_long_text(
+            [segment], max_chars=_scaled_chars(MAX_TEXT_CHARS_PER_CHUNK, scale),
+            digit_weight=digit_weight, avoid_short_final=NO_SHORT_FINAL_SENTENCE,
+        )
+        pieces.extend(split)
+        controls.extend([value] * len(split))
+        origins.extend([index] * len(split))
+        limits.extend([_scaled_chars(MAX_MERGED_PIECE_CHARS, scale)] * len(split))
+    if MERGE_SHORT_CLIENT_SEGMENTS:
+        # Neighbours with identical controls entries, within a segment and across segments.
+        pieces, controls = merge_short_pieces(
+            pieces, controls, max_chars=limits, digit_weight=digit_weight, avoid_short_final=NO_SHORT_FINAL_SENTENCE,
+        )
+    elif MERGE_SHORT_PIECES:
+        pieces, origins = merge_short_pieces(
+            pieces, origins, max_chars=limits, digit_weight=digit_weight, avoid_short_final=NO_SHORT_FINAL_SENTENCE,
+        )
+        controls = [entries[index] for index in origins]
+    return pieces, (controls if segment_controls is not None else None)
+
+
+def _chunk_scales(req: TTSRequest, engine, text, segment_controls) -> list[float] | None:
+    """Per-segment chunk-length scales from the rate slider (CB0_RATE_AWARE_CHUNK_CHARS)."""
+    if req.controls is None and segment_controls is None:
+        return None
+    return engine.chunk_char_scales(
+        len(text) if isinstance(text, list) else 1, req.language, req.tag, req.use_system_tag,
+        controls=req.controls, segment_controls=segment_controls,
+    )
+
+
+def _require_controls(req: TTSRequest, engine, text, segment_controls) -> None:
+    if req.controls is None and segment_controls is None:
+        return
+    n_segments = len(text) if isinstance(text, list) else 1
+    try:
+        engine._cb0_system_tags(
+            "", n_segments, req.language, req.tag, req.use_system_tag,
+            controls=req.controls, segment_controls=segment_controls,
+        )
+    except ValueError as exc:
+        raise TTSRequestOptionError(str(exc)) from exc
+
+
 def _require_vibevoice(req: TTSRequest, engine) -> None:
     if req.vibevoice_postprocess is True and engine.vv_tokenizer is None:
         raise TTSRequestOptionError(
@@ -471,6 +605,19 @@ def _bitrate_number(value: str, *, bits_per_second: bool) -> int:
     return kbps * 1000 if bits_per_second else kbps
 
 
+def _continuation_context(req: TTSRequest, engine) -> str | None:
+    """prefix_text, when the first segment's verbalization reads it as context (VERBALIZE_PREFIX_CONTEXT)."""
+    if req.prefix_text and req.prefix_text.strip() and engine.config.verbalize_prefix_context:
+        return req.prefix_text
+    return None
+
+
+async def _verbalize_segment(engine, segment: str, context: str | None) -> str:
+    if context:
+        return await engine.verbalizer.verbalize_continuation(context, segment)
+    return await engine.verbalizer.verbalize(segment)
+
+
 async def synthesize(req: TTSRequest) -> dict:
     if req.priority == "high":
         async with get_gate().high():
@@ -483,18 +630,30 @@ async def _synthesize(req: TTSRequest) -> dict:
     _require_verbalizer(req, engine)
     _require_vibevoice(req, engine)
     raw = _prepare_raw_text(req.text)
+    segment_controls = req.segment_controls
     if req.use_verbalization:
-        raw = split_long_text(raw, digit_weight=4)
+        raw, segment_controls = _split_with_controls(
+            raw, segment_controls, digit_weight=4,
+            chunk_scales=_chunk_scales(req, engine, raw, segment_controls),
+        )
+        context = _continuation_context(req, engine)   # only the first segment continues the prefix
         if isinstance(raw, list):
-            raw = [await engine.verbalizer.verbalize(segment) for segment in raw]
+            raw = [
+                await _verbalize_segment(engine, segment, context if index == 0 else None)
+                for index, segment in enumerate(raw)
+            ]
         else:
-            raw = await engine.verbalizer.verbalize(raw)
+            raw = await _verbalize_segment(engine, raw, context)
     text = (
         [sanitize_text_for_tts(segment) for segment in raw]
         if isinstance(raw, list)
         else sanitize_text_for_tts(raw)
     )
-    text = split_long_text(text)
+    text, segment_controls = _split_with_controls(
+        text, segment_controls,
+        chunk_scales=_chunk_scales(req, engine, text, segment_controls),
+    )
+    _require_controls(req, engine, text, segment_controls)
 
     audio, codebook_tokens = await engine.generate(
         text=text,
@@ -518,20 +677,37 @@ async def _synthesize(req: TTSRequest) -> dict:
         tag=req.tag,
         use_system_tag=req.use_system_tag,
         vllm_priority=req.vllm_priority,
+        controls=req.controls,
+        segment_controls=segment_controls,
     )
 
     output_sample_rate = DUALCODEC_SAMPLE_RATE
+    # engine.generate scaled the audio by
+    # -OUTPUT_HEADROOM_DB dB. The edge trim and the pause cap lower their fixed
+    # thresholds by the same dB, so their cut points match the unscaled audio
+    # and the headroom is a pure level change (0 dB: the old thresholds).
+    headroom_db = engine.config.output_headroom_db
     if req.trim_silence_padding_ms is not None:
         audio = _trim_boundary_silence(
             audio,
             padding_ms=req.trim_silence_padding_ms,
+            headroom_db=headroom_db,
+            # PREFIX_LEAD_TRIM_PADDING_MS: a shorter LEADING edge for a continuation (prefixed request); the tail keeps the request's
+            lead_padding_ms=engine.config.prefix_lead_trim_padding_ms if req.prefix_text else None,
         )
     if req.mossformer2_postprocess:
         audio, output_sample_rate = await asyncio.to_thread(
             _apply_mossformer2_postprocessing,
             audio,
             output_sample_rate,
+            headroom_db=headroom_db,
         )
+    if req.prefix_text and engine.config.prefix_start_fade:
+        # PREFIX_START_FADE: the client splices this continuation after its own audio; fade the
+        # response's first prefix_start_fade_ms in, on the final audio (after trim / pause cap / MossFormer2).
+        from app.dualcodec_utils import start_fade
+
+        audio = start_fade(audio, engine.config.prefix_start_fade_ms, output_sample_rate)
     audio_bytes, mime_type = _encode_audio(
         audio,
         req.format,
@@ -614,6 +790,15 @@ def create_app():
     async def healthz():
         return {"status": "ok"}
 
+    @app.get("/controls")
+    async def controls_catalog():
+        """Style sliders of the loaded model, for the `controls` / `segment_controls` request fields."""
+        if not _engine_ready.is_set():
+            return JSONResponse(content={"error": "Model still loading"}, status_code=503)
+        engine = await _get_engine()
+        catalog = engine.controls.catalog() if engine.controls is not None else []
+        return {"controls": catalog}
+
     @app.get("/readyz")
     async def readyz():
         if _engine_ready.is_set():
@@ -642,8 +827,12 @@ def create_app():
         """
         _require_verbalizer(req, engine)
         if req.use_verbalization:
+            # generate_streaming preprocesses segments[0] first; only it continues the prefix.
+            pending_context = [_continuation_context(req, engine)]
+
             async def preprocess(text: str) -> str:
-                text = await engine.verbalizer.verbalize(text)
+                context, pending_context[0] = pending_context[0], None
+                text = await _verbalize_segment(engine, text, context)
                 return sanitize_text_for_tts(text)
             return preprocess
         return None
@@ -657,13 +846,18 @@ def create_app():
                 if isinstance(text, list)
                 else sanitize_text_for_tts(text)
             )
-        return split_long_text(
-            text,
+        text, segment_controls = _split_with_controls(
+            text, req.segment_controls,
             digit_weight=4 if preprocessor is not None else 1,
-        ), preprocessor
+            chunk_scales=_chunk_scales(req, engine, text, req.segment_controls),
+        )
+        _require_controls(req, engine, text, segment_controls)
+        return text, preprocessor, segment_controls
 
-    def _streaming_kwargs(req: TTSRequest, preprocessor) -> dict:
+    def _streaming_kwargs(req: TTSRequest, preprocessor, segment_controls=None) -> dict:
         return {
+            "controls": req.controls,
+            "segment_controls": segment_controls,
             "temperature": req.temperature,
             "top_p": req.top_p,
             "top_k": req.top_k,
@@ -767,7 +961,7 @@ def create_app():
                     content={"error": "streaming is unavailable because VibeVoice is not loaded"},
                     status_code=503,
                 )
-            text, preprocessor = _prepare_streaming_request(req, engine)
+            text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
             writer = Mp3StreamWriter(
                 DUALCODEC_SAMPLE_RATE,
                 bitrate=_bitrate_number(req.bitrate, bits_per_second=False),
@@ -777,7 +971,7 @@ def create_app():
                 _audio_sse_generator(
                     engine, text, writer,
                     priority_high=req.priority == "high",
-                    **_streaming_kwargs(req, preprocessor),
+                    **_streaming_kwargs(req, preprocessor, segment_controls),
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -825,7 +1019,7 @@ def create_app():
                     })
                     await ws.close(code=1013)
                     return
-                text, preprocessor = _prepare_streaming_request(req, engine)
+                text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
                 opus_enc = _OpusStreamEncoder(
                     DUALCODEC_SAMPLE_RATE,
                     bitrate=_bitrate_number(req.bitrate, bits_per_second=True),
@@ -837,7 +1031,7 @@ def create_app():
                     try:
                         async for audio_chunk in engine.generate_streaming(
                             text=text,
-                            **_streaming_kwargs(req, preprocessor),
+                            **_streaming_kwargs(req, preprocessor, segment_controls),
                         ):
                             await ws.send_bytes(opus_enc.encode(audio_chunk))
                         await ws.send_json({"done": True})

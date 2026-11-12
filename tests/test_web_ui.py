@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import httpx
 import pytest
@@ -69,6 +70,71 @@ def test_standalone_ui_routes_reference_packaged_files():
         "tontaube-logo.png",
     }
     assert all((UI_DIR / filename).is_file() for filename, _ in UI_ROUTES.values())
+
+
+def _ui_text(filename):
+    return (UI_DIR / filename).read_text(encoding="utf-8")
+
+
+def test_ui_script_only_references_elements_that_exist_in_the_page():
+    html = _ui_text("index.html")
+    page_ids = set(re.findall(r'\bid="([^"]+)"', html))
+    used_ids = set(re.findall(r'byId\("([^"]+)"\)', _ui_text("app.js")))
+    assert used_ids - page_ids == set()
+
+
+def test_style_slider_section_is_always_present_in_the_form():
+    html = _ui_text("index.html")
+    section = re.search(r'<section\b[^>]*\bid="sliders-card"[^>]*>', html)
+    assert section is not None
+    assert "hidden" not in section.group(0)
+    # Inside the form, before the advanced controls, with a status line for the reason
+    # the catalog is unavailable and a reset-all action.
+    form = html[html.index('<form id="tts-form"'):html.index("</form>")]
+    assert form.index('id="sliders-card"') < form.index("Advanced controls")
+    for element in ('id="slider-status"', 'id="slider-fields"', 'id="reset-sliders"'):
+        assert element in form
+
+
+def test_style_sliders_are_range_inputs_driven_by_the_controls_catalog():
+    script = _ui_text("app.js")
+    assert 'input.type = "range"' in script
+    assert "input.max = String(control.bins - 1)" in script
+    assert "control.low" in script and "control.high" in script
+    assert "aria-valuetext" in script
+    assert "label.htmlFor" in script
+    assert "/controls" in script
+    assert "<select" not in _ui_text("index.html").split('id="sliders-card"')[1].split("Advanced controls")[0]
+
+
+def test_style_sliders_are_sent_by_both_transports_and_only_when_set():
+    script = _ui_text("app.js")
+    # buildPayload feeds both generateComplete (/predict) and generateStream (/stream).
+    assert script.count("await buildPayload(streaming)") == 1
+    assert "streaming ? await generateStream(payload) : await generateComplete(payload)" in script
+    assert "const controls = selectedControls();\n  if (controls) payload.controls = controls;" in script
+    assert "return Object.keys(controls).length ? controls : undefined;" in script
+    assert "segment_controls" not in script
+
+
+def test_style_slider_catalog_is_reloaded_and_retried_while_the_model_loads():
+    script = _ui_text("app.js")
+    assert "refreshControls();\ncheckServer({refresh: false});" in script
+    for field in ("server-url", "api-key"):
+        assert re.search(rf'byId\("{field}"\)\.addEventListener\("input", [^\n]*scheduleControlsRefresh', script)
+    assert "response.status === 503" in script
+    retry = re.search(r"CONTROLS_RETRY_MS = \[([^\]]+)\]", script)
+    delays = [int(value) for value in retry.group(1).split(",")]
+    assert min(delays) >= 3000 and delays == sorted(delays)  # no retry storm, only backs off
+    assert 'document.addEventListener("visibilitychange"' in script
+
+
+def test_ui_page_has_no_inline_script_or_style_blocked_by_the_csp():
+    html = _ui_text("index.html")
+    assert not re.search(r"<script(?![^>]*\bsrc=)", html)
+    assert "<style" not in html and 'style="' not in html
+    script = _ui_text("app.js")
+    assert "innerHTML" not in script and 'setAttribute("style"' not in script
 
 
 def test_ui_voice_catalog_uses_local_files_without_exposing_paths(tmp_path, monkeypatch):
@@ -220,3 +286,10 @@ async def test_authenticated_cors_preflight_does_not_require_api_key(monkeypatch
     assert preflight.headers["access-control-allow-origin"] == origin
     assert unauthorized.status_code == 401
     await client.aclose()
+
+
+def test_unset_slider_rests_at_the_catalog_default_step():
+    script = _ui_text("app.js")
+    assert "defaultStep: Number.isInteger(c.default)" in script
+    resting = script.split("function sliderRestingStep", 1)[1].split("}", 1)[0]
+    assert "control.defaultStep" in resting

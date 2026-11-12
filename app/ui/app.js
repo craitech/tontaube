@@ -117,6 +117,276 @@ async function selectedVoiceBase64() {
   return audioBlobBase64(await response.blob());
 }
 
+// --- Style sliders -----------------------------------------------------------
+// The catalog comes from GET /controls. A slider the user has not touched is "Model
+// default" and is not sent. A range input has no empty value, so an untouched slider
+// sits dimmed at its middle step; the first interaction sets it, and its Reset button
+// (or "Reset all") returns it to the model default.
+
+const CONTROLS_RETRY_MS = [3000, 5000, 8000, 12000, 15000];  // model still loading: slow, capped
+const CONTROLS_DEBOUNCE_MS = 600;
+const CONTROLS_TIMEOUT_MS = 8000;
+const sliderValues = new Map();  // name -> {bins, value}; absent = model default
+let sliderCatalog = [];
+let catalogSignature = null;
+let controlsRequest = 0;
+let controlsAbort = null;
+let controlsTimer = null;
+let controlsRetries = 0;
+let controlsRetryWanted = false;
+
+function validCatalog(list) {
+  return list.filter((c) => c && typeof c.name === "string" && c.name
+    && Number.isInteger(c.bins) && c.bins >= 1)
+    .map((c) => ({
+      name: c.name, bins: c.bins, description: String(c.description || ""),
+      low: String(c.low || ""), high: String(c.high || ""),
+      defaultStep: Number.isInteger(c.default) && c.default >= 0 && c.default < c.bins ? c.default : null,
+    }));
+}
+
+function sliderTitle(control) {
+  return control.description || control.name.replaceAll("_", " ");
+}
+
+function sliderRestingStep(control) {
+  // Where an unset slider sits: the step the catalog names as the model's default, else the middle.
+  if (control.defaultStep !== null) return control.defaultStep;
+  return Math.floor((control.bins - 1) / 2);
+}
+
+function sliderStepMeaning(control, step) {
+  if (control.bins < 2) return "";
+  if (step === 0 && control.low) return control.low;
+  if (step === control.bins - 1 && control.high) return control.high;
+  if (control.low && control.high) return `between ${control.low} and ${control.high}`;
+  return "";
+}
+
+function sliderValueText(control, step, isSet) {
+  if (!isSet) return "Model default, not set";
+  const meaning = sliderStepMeaning(control, step);
+  return `Step ${step} of 0 to ${control.bins - 1}${meaning ? `, ${meaning}` : ""}`;
+}
+
+function setSliderStatus(kind, message) {
+  const box = byId("slider-status");
+  box.replaceChildren();
+  box.hidden = !message;
+  if (!message) return;
+  const dot = document.createElement("span");
+  dot.className = `status-dot ${kind || ""}`;
+  dot.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.textContent = message;
+  box.append(dot, text);
+}
+
+function setSliderCount() {
+  const set = sliderCatalog.filter((c) => sliderValues.has(c.name)).length;
+  byId("slider-count").textContent = sliderCatalog.length
+    ? (set ? `${set} of ${sliderCatalog.length} set` : "None set, the model decides")
+    : "";
+  byId("reset-sliders").setAttribute("aria-disabled", set ? "false" : "true");
+}
+
+function paintSlider(row, control) {
+  const entry = sliderValues.get(control.name);
+  const isSet = entry !== undefined;
+  const step = isSet ? entry.value : sliderRestingStep(control);
+  const input = row.querySelector("input");
+  input.value = String(step);
+  input.setAttribute("aria-valuetext", sliderValueText(control, step, isSet));
+  row.classList.toggle("is-set", isSet);
+  row.querySelector(".slider-value").textContent = isSet ? `Step ${step}` : "Model default";
+  row.querySelector(".slider-reset").hidden = !isSet;
+  setSliderCount();
+}
+
+function setSliderValue(row, control, value) {
+  if (value === null) sliderValues.delete(control.name);
+  else sliderValues.set(control.name, {bins: control.bins, value});
+  paintSlider(row, control);
+}
+
+const sliderNavigationKeys = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+
+function buildSliderRow(control, index) {
+  const row = document.createElement("div");
+  row.className = "slider-row";
+  row.dataset.control = control.name;
+  const inputId = `slider-${index}`;
+
+  const head = document.createElement("div");
+  head.className = "slider-head";
+  const label = document.createElement("label");
+  label.htmlFor = inputId;
+  label.textContent = sliderTitle(control);
+  const value = document.createElement("span");
+  value.className = "slider-value";
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "text-button slider-reset";
+  reset.textContent = "Reset";
+  reset.setAttribute("aria-label", `Reset ${sliderTitle(control)} to model default`);
+  head.append(label, value, reset);
+
+  const input = document.createElement("input");
+  input.type = "range";
+  input.id = inputId;
+  input.min = "0";
+  input.max = String(control.bins - 1);
+  input.step = "1";
+  input.dataset.control = control.name;
+  const ends = document.createElement("div");
+  ends.className = "slider-ends";
+  const low = document.createElement("span");
+  low.textContent = control.low ? `0 · ${control.low}` : "0";
+  const high = document.createElement("span");
+  high.textContent = control.high ? `${control.bins - 1} · ${control.high}` : String(control.bins - 1);
+  ends.append(low, high);
+  ends.id = `${inputId}-ends`;
+  input.setAttribute("aria-describedby", ends.id);
+  row.append(head, input, ends);
+
+  // An untouched slider has no value to "change", so a click on the thumb or a
+  // navigation key also counts as setting it (input events alone would miss both).
+  const activate = () => { if (!sliderValues.has(control.name)) setSliderValue(row, control, Number(input.value)); };
+  input.addEventListener("input", () => setSliderValue(row, control, Number(input.value)));
+  input.addEventListener("click", activate);
+  input.addEventListener("keydown", (event) => { if (sliderNavigationKeys.has(event.key)) activate(); });
+  reset.addEventListener("click", () => { setSliderValue(row, control, null); input.focus(); });
+  paintSlider(row, control);
+  return row;
+}
+
+function clearSliders() {
+  sliderCatalog = [];
+  catalogSignature = null;
+  byId("slider-fields").replaceChildren();
+  setSliderCount();
+}
+
+function showCatalog(controls) {
+  const catalog = validCatalog(controls);
+  for (const [name, entry] of [...sliderValues]) {
+    const control = catalog.find((c) => c.name === name);
+    if (!control || control.bins !== entry.bins) sliderValues.delete(name);
+  }
+  const signature = JSON.stringify(catalog);
+  if (signature !== catalogSignature) {
+    catalogSignature = signature;
+    sliderCatalog = catalog;
+    byId("slider-fields").replaceChildren(...catalog.map(buildSliderRow));
+  }
+  setSliderCount();
+  setSliderStatus("", catalog.length ? "" : "This model has no style sliders.");
+}
+
+function resetAllSliders() {
+  if (byId("reset-sliders").getAttribute("aria-disabled") === "true") return;
+  for (const control of sliderCatalog) sliderValues.delete(control.name);
+  for (const row of byId("slider-fields").children) {
+    paintSlider(row, sliderCatalog.find((c) => c.name === row.dataset.control));
+  }
+  byId("slider-fields").querySelector("input")?.focus();
+}
+
+function selectedControls() {
+  const controls = {};
+  for (const control of sliderCatalog) {
+    const entry = sliderValues.get(control.name);
+    if (entry) controls[control.name] = entry.value;
+  }
+  return Object.keys(controls).length ? controls : undefined;
+}
+
+function cancelControlsWork() {
+  controlsRequest += 1;
+  clearTimeout(controlsTimer);
+  controlsTimer = null;
+  if (controlsAbort) controlsAbort.abort();
+  controlsAbort = null;
+}
+
+function controlsUnavailable(message) {
+  clearSliders();
+  controlsRetryWanted = false;
+  setSliderStatus("error", message);
+}
+
+async function loadControls() {
+  cancelControlsWork();
+  if (document.hidden) { controlsRetryWanted = true; return; }
+  const request = controlsRequest;
+  const controller = new AbortController();
+  controlsAbort = controller;
+  const timeout = setTimeout(() => controller.abort(), CONTROLS_TIMEOUT_MS);
+  const url = baseUrl();
+  if (!sliderCatalog.length) setSliderStatus("", "Looking for the server's style sliders…");
+  try {
+    const response = await fetch(`${url}/controls`, {headers: apiKeyHeaders(), signal: controller.signal});
+    if (request !== controlsRequest) return;
+    if (response.status === 503) {
+      clearSliders();
+      setConnection("", "Server loading");
+      const delay = CONTROLS_RETRY_MS[Math.min(controlsRetries, CONTROLS_RETRY_MS.length - 1)];
+      controlsRetries += 1;
+      controlsRetryWanted = true;
+      setSliderStatus("", "The model is still loading. The sliders will appear here as soon as it is ready.");
+      controlsTimer = setTimeout(loadControls, delay);
+      return;
+    }
+    if (response.status === 401 || response.status === 403) {
+      controlsUnavailable("The server wants an API key, or rejected the one entered. Enter it under Connection.");
+      return;
+    }
+    if (!response.ok) {
+      controlsUnavailable(`The server could not list its sliders (${response.status}).`);
+      return;
+    }
+    const body = await response.json();
+    if (request !== controlsRequest) return;
+    controlsRetryWanted = false;
+    controlsRetries = 0;
+    showCatalog(Array.isArray(body.controls) ? body.controls : []);
+    setConnection("connected", "Server ready");
+  } catch (error) {
+    if (request !== controlsRequest) return;  // superseded, or cancelled while hidden
+    controlsUnavailable(error.name === "AbortError"
+      ? "The server did not answer in time, so its sliders could not be listed. Use Check connection to try again."
+      : "Server not reachable, so its sliders cannot be listed. Check the Server URL, then use Check connection.");
+  } finally {
+    clearTimeout(timeout);
+    if (controlsAbort === controller) controlsAbort = null;
+  }
+}
+
+function refreshControls() {
+  controlsRetries = 0;
+  return loadControls();
+}
+
+let controlsDebounce = null;
+function scheduleControlsRefresh() {
+  // The server address or key changed: drop any retry loop aimed at the old one.
+  cancelControlsWork();
+  controlsRetryWanted = false;
+  clearTimeout(controlsDebounce);
+  if (!sliderCatalog.length) setSliderStatus("", "Waiting for the new server address…");
+  controlsDebounce = setTimeout(refreshControls, CONTROLS_DEBOUNCE_MS);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    // Stop polling in a hidden tab; resume on return if still waiting for the model.
+    if (controlsTimer !== null || controlsAbort !== null) controlsRetryWanted = true;
+    cancelControlsWork();
+  } else if (controlsRetryWanted) {
+    refreshControls();
+  }
+});
+
 async function buildPayload(streaming) {
   const text = byId("text").value.trim();
   if (!text) throw new Error("Enter text to generate.");
@@ -143,6 +413,8 @@ async function buildPayload(streaming) {
     if (value !== undefined) payload[key] = value;
   }
 
+  const controls = selectedControls();
+  if (controls) payload.controls = controls;
   const prefixText = byId("prefix-text").value;
   if (prefixText) payload.prefix_text = prefixText;
   const vibevoice = byId("vibevoice-postprocess").value;
@@ -311,17 +583,19 @@ function showResult(output, extension) {
   player.play().catch(() => {});
 }
 
-async function checkServer() {
+async function checkServer({refresh = true} = {}) {
   setConnection("", "Checking…");
   try {
     const response = await fetch(`${baseUrl()}/readyz`, {headers: apiKeyHeaders()});
     if (response.status === 503) {
       setConnection("", "Server loading");
       setStatus("", "Inference server is reachable and still loading models.");
+      if (refresh) refreshControls();
       return;
     }
     if (!response.ok) throw new Error(await parseError(response));
     setConnection("connected", "Server ready");
+    if (refresh) await refreshControls();
   } catch (error) {
     setConnection("error", "Unavailable");
     setStatus("error", `Could not reach the inference API: ${error.message}`);
@@ -417,8 +691,10 @@ form.addEventListener("submit", async (event) => {
   finally { setLoading(false); }
 });
 
-byId("check-server").addEventListener("click", checkServer);
-byId("server-url").addEventListener("input", syncApiDocsLink);
+byId("check-server").addEventListener("click", () => checkServer());
+byId("server-url").addEventListener("input", () => { syncApiDocsLink(); scheduleControlsRefresh(); });
+byId("api-key").addEventListener("input", scheduleControlsRefresh);
+byId("reset-sliders").addEventListener("click", resetAllSliders);
 byId("refresh-voices").addEventListener("click", () => refreshVoices());
 byId("language").addEventListener("change", () => refreshVoices());
 byId("text").addEventListener("input", () => { byId("char-count").textContent = `${byId("text").value.length.toLocaleString()} characters`; });
@@ -431,4 +707,5 @@ syncApiDocsLink();
 byId("text").dispatchEvent(new Event("input"));
 syncTransportState();
 refreshVoices(true);
-checkServer();
+refreshControls();
+checkServer({refresh: false});

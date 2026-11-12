@@ -83,8 +83,16 @@ def test_language_aliases(value, expected):
 def test_request_builds_exact_training_label():
     req = TTSRequest(text="Hallo", language="de", tag="conversational")
     assert req.language == "german"
-    assert req.temperature == 0.8
+    assert req.temperature is None and req.frequency_penalty is None
     assert build_system_prompt(req.language, req.tag) == "german : conversational"
+
+
+def test_sampling_defaults():
+    from app.config import ServerConfig
+    from app.inference import TTSEngine
+
+    sampling = TTSEngine(ServerConfig())._resolve_params(voice_tokens=[[1, 2], [3, 4], [5, 6], [7, 8]])[0]
+    assert (sampling["temperature"], sampling["frequency_penalty"]) == (0.7, 0.1)
 
 
 def test_request_accepts_backend_compatibility_payload():

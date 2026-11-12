@@ -2,30 +2,32 @@
   <img src="assets/tontaube-logo.png" alt="Tontaube" width="180">
 </p>
 
-<h1 align="center">TontaubeV1</h1>
+<h1 align="center">TontaubeV1.1</h1>
 
-TontaubeV1 is a multilingual text-to-speech model by Craitech. It is designed
+TontaubeV1.1 is a multilingual text-to-speech model by Craitech. It is designed
 for expressive voice cloning, long-form speech, and low-latency streaming, with
 first-class support for English and German and additional support for Spanish,
 French, Italian, Dutch, and Portuguese.
 
-This repository contains the vLLM inference server. The model weights are
-distributed separately. The four Tontaube codebook models are released
-together. All enabled models are downloaded from their original Hugging Face
-repositories on first use and reused from local caches on subsequent starts.
+This repository contains the inference server. By default it runs the 4-bit
+model on small NVIDIA GPUs or on CPUs; a vLLM backend serves the full-precision
+model on larger GPUs. The model weights are distributed separately. All enabled
+models are downloaded from their original Hugging Face repositories on first
+use and reused from local caches on subsequent starts.
 
-[Model weights](https://huggingface.co/TontaubeAI/TontaubeV1) ·
-[Technical report](https://tontaube.ai/papers/tontaube-v1-technical-report.pdf) ·
-[Try TontaubeV1 online](https://tontaube.ai/playground)
+[Model weights (4-bit)](https://huggingface.co/TontaubeAI/TontaubeV1.1-int4) ·
+[Model weights (full precision)](https://huggingface.co/TontaubeAI/TontaubeV1.1) ·
+[Technical report (TontaubeV1)](https://tontaube.ai/papers/tontaube-v1-technical-report.pdf) ·
+[Try Tontaube online](https://tontaube.ai/playground)
 
 ## Quick start
 
-The shortest supported path requires Linux, an NVIDIA GPU and driver,
-[`uv`](https://docs.astral.sh/uv/getting-started/installation/), FFmpeg, and the
-Opus runtime. Clone the release and start the server:
+The shortest supported path requires Linux, an NVIDIA GPU (Ampere or newer) or
+an x86-64 CPU, [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
+FFmpeg, and the Opus runtime. Clone the release and start the server:
 
 ```bash
-git clone --branch v1.0.0 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.1.0 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run --python 3.12 --frozen tontaube serve
 ```
@@ -65,9 +67,9 @@ python3 -c 'import base64,json,sys; print(json.dumps({"text":"This voice was clo
 
 English text verbalization is optional and disabled by default. To load it,
 start the server with `ENABLE_VERBALIZATION=1`; requests that should use it must
-also send `"use_verbalization": true`. The verbalizer uses substantial
-additional VRAM (about 4.8–5.5 GiB with the bundled capacity profiles), so
-leave it disabled when written and spoken forms are already identical.
+also send `"use_verbalization": true`. The verbalizer uses about 1.9 GiB of
+additional GPU memory, so leave it disabled when written and spoken forms are
+already identical.
 
 ### Browser interface
 
@@ -84,53 +86,37 @@ only the UI can use `python3 -m app.ui_server` without installing the GPU
 environment. A remote API must allow the UI's exact origin through
 `TTS_CORS_ORIGINS`.
 
-The UI supports bundled voice selection, local voice-reference uploads,
-sampling and acoustic controls, WAV/MP3/Opus responses, MP3 streaming, instant
-playback, and downloads. It reads its own `voices/` directory and uploads the
-selected audio file with each request, so a remote inference server does not need the
-sample files. References live together in `voices/samples/`; optional language
-and style metadata in `voices/manifest.json` controls language filtering and
-groups the voice menu by style. Voices without a declared language appear for
-every language, while voices without a declared style remain ungrouped. A badge
-also shows the selected voice's style without changing the independently
-selected synthesis style.
+The UI supports bundled voice selection, local voice-reference uploads, style
+sliders, sampling and acoustic controls, WAV/MP3/Opus responses, MP3 streaming,
+instant playback, and downloads. It reads its own `voices/` directory and
+uploads the selected audio file with each request, so a remote inference server
+does not need the sample files. References live together in `voices/samples/`;
+optional language and style metadata in `voices/manifest.json` controls language
+filtering and groups the voice menu by style.
 
 ## Installation details
 
 ### Requirements
 
-The supported reference setup is Linux with an NVIDIA GPU. Python 3.12 is the
-reference interpreter. On Debian or Ubuntu, install the native audio packages
-with:
+The supported reference setup is Linux with Python 3.12, on an NVIDIA GPU with
+bf16 support (Ampere or newer) or on an x86-64 CPU with AVX2, FMA, and F16C and
+a C++ compiler. A Pascal GPU (GTX 10 series) also works, with the CUDA 12.6
+PyTorch build and decode kernels for GPUs without tensor cores, both
+[selected automatically](#gpus-the-default-pytorch-build-does-not-support). On
+Debian or Ubuntu, install the native audio packages with:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y ffmpeg libopus0
 ```
 
-Native Windows, macOS, CPU-only inference, and non-NVIDIA accelerators are not
-supported by this vLLM server. Windows users can use a CUDA-enabled WSL2 Linux
-environment. Use an NVIDIA GPU with at least 24 GiB of VRAM for the `low-vram`
-or default `balanced` profile, and at least 32 GiB for `high-throughput`. Select
-the lower-capacity profile with:
-
-```bash
-TTS_CAPACITY_PROFILE=low-vram uv run tontaube serve
-```
-
-These are practical release targets rather than hard hardware checks. The
-per-engine GiB budgets can be tuned with `GPU_MEMORY_GIB_PER_CB` and
-`VERBALIZATION_GPU_MEMORY_GIB`; leave enough unassigned VRAM for DualCodec,
-VibeVoice, CUDA, and request-time tensors.
-
-The first clean-cache startup may use more memory while vLLM compiles and
-caches kernels. If that cold start runs out of memory, retrying once may succeed
-because the follow-up start can reuse the newly created caches. A deployment
-that must start reliably from a clean cache should instead lower its GiB
-budgets and validate them on the target GPU.
+Native Windows, macOS, and non-NVIDIA accelerators are not supported; Windows
+users can use a CUDA-enabled WSL2 Linux environment. The default backend loads
+in about 4 GiB of GPU memory and peaks at about 6.5 GiB. The
+[vLLM backend](#vllm-backend) needs at least 24 GiB.
 
 The application pins the Tontaube weights and upstream model revisions for
-release `v1.0.0`. For a later release, use its matching source tag; do not mix
+release `v1.1.0`. For a later release, use its matching source tag; do not mix
 model bundles and inference code from different releases. While the Tontaube
 repositories are private or gated, provide a read-only `HF_TOKEN`.
 
@@ -142,6 +128,51 @@ output and the streaming routes are unavailable.
 `tontaube serve` runs model preflight automatically before CUDA initialization.
 Run `uv run tontaube preflight` separately only to diagnose model resolution
 without starting the server.
+
+### GPUs the default PyTorch build does not support
+
+The default PyTorch wheels (CUDA 12.8) have no kernels for Pascal and older
+GPUs (compute capability below 7.0, such as the GTX 10 series). Before any model
+is downloaded, `tontaube serve` compares the GPU with the installed build. If
+the build does not support it but the CUDA 12.6 build does, a uv checkout
+restarts itself in a separate environment, `.venv-cu126`, and prints a line
+saying so; the first start downloads several GB (the environment takes about
+9 GB on disk). Other installs stop with the commands below. Nothing changes
+for supported GPUs, CPU runs, or machines without a GPU.
+
+To select the build yourself, or to install it without the automatic restart:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-cu126 uv run --frozen --extra cu126 tontaube serve
+```
+
+Without `UV_PROJECT_ENVIRONMENT`, `uv run --frozen --extra cu126` switches the
+regular `.venv` to the CUDA 12.6 build.
+
+With pip, in a fresh virtual environment (the extra index carries the CUDA 12.6
+wheels):
+
+```bash
+python -m pip install --no-deps --require-hashes \
+  --extra-index-url https://download.pytorch.org/whl/cu126 \
+  -r requirements-pip-cu126.lock
+python -m pip install --no-deps --no-build-isolation .
+```
+
+`TONTAUBE_TORCH_VARIANT` controls the check: `auto` (default), `default` to
+disable it, or `cu126` to always use the CUDA 12.6 build. A GPU older than
+compute capability 5.0 supports neither build; use `LITE_DEVICE=cpu`. The vLLM
+backend always uses the default build.
+
+These GPUs also have no tensor cores, which the lite backend's decode kernels
+(the quantized matrix-vector products and the attention over the KV cache) are
+built for: without them, those kernels do many times the necessary work. On
+GPUs below compute capability 7.0 the lite backend therefore decodes with
+kernels made of plain fp32 multiply-adds instead; Volta and newer GPUs (compute
+capability 7.0 and up) keep the tensor-core kernels unchanged. `LITE_FMA_KERNELS` controls the choice: `auto`
+(default) as described, `on` to use the multiply-add kernels on every GPU, or
+`off` to use the tensor-core kernels on every GPU, for example to compare the
+two or to rule out the new kernels when diagnosing a problem.
 
 ### Explicit environment setup
 
@@ -179,18 +210,18 @@ release rather than editing it manually.
 
 ### Docker
 
-Docker is available for deployments that want the CUDA, PyTorch, and vLLM
-stack encapsulated in an image. Install Docker Engine and the NVIDIA Container
+Docker is available for deployments that want the CUDA and PyTorch stack
+encapsulated in an image. Install Docker Engine and the NVIDIA Container
 Toolkit, then build and run:
 
 ```bash
-docker build -t tontaube-v1:1.0.0 .
+docker build -t tontaube:1.1.0 .
 
 docker run --rm --gpus all --ipc=host \
   -p 127.0.0.1:8080:8080 \
   -v tontaube-hf-cache:/root/.cache/huggingface \
   -v tontaube-cache:/root/.cache/tontaube \
-  tontaube-v1:1.0.0
+  tontaube:1.1.0
 ```
 
 The named volumes preserve downloaded models and the prepared VibeVoice
@@ -201,15 +232,17 @@ Tontaube model repositories are private or gated.
 
 - Synthesis with bundled voices and zero-shot cloning from an audio reference
 - `audiobook`, `conversational`, and `agentic` speaking styles
+- Five style sliders: speaking rate, pauses, intonation, pitch, and crisp articulation
 - Long-form generation with boundary-aware text and audio chunking
 - Low-latency MP3 and Opus streaming
 - Character-level text tokenization and multilingual language conditioning
-- Four codebook models served by vLLM in one inference process
+- 4-bit weights for small GPUs and CPUs by default, or full precision on vLLM
 - Optional English text verbalization, disabled by default
 
 ## Examples
 
-These MP3 samples were normalized to a consistent speech listening level.
+These MP3 samples were normalized to a consistent speech listening level. The
+German sample was generated with TontaubeV1.
 
 ### Audiobook
 
@@ -251,15 +284,9 @@ These MP3 samples were normalized to a consistent speech listening level.
 
 [Download MP3](assets/showcase/english-agentic-02.mp3)
 
-**English 3**
-
-<audio controls preload="none" src="assets/showcase/english-agentic-03.mp3"></audio>
-
-[Download MP3](assets/showcase/english-agentic-03.mp3)
-
 ## How it works
 
-TontaubeV1 represents speech with four DualCodec codebooks at 12.5 Hz. CB0
+Tontaube represents speech with four DualCodec codebooks at 12.5 Hz. CB0
 predicts semantic audio tokens autoregressively. CB1, CB2, and CB3 predict the
 remaining acoustic codebooks from the completed lower-codebook rows. Acoustic
 chunks are independent of preceding acoustic chunks and can therefore be
@@ -267,10 +294,11 @@ generated in parallel without accumulating voice drift across a long text.
 
 CB0 is based on Qwen3-1.7B; CB1-CB3 are based on Qwen3-0.6B. Each stage uses a
 Tontaube audio-token output head. DualCodec supplies the discrete speech
-representation, while a reduced
-VibeVoice acoustic encoder/decoder is used for output re-encoding and streaming
-decode. The optional verbalizer is a separately trained model that converts
-written English into a more suitable spoken form before synthesis.
+representation, while a reduced VibeVoice acoustic encoder/decoder is used for
+output re-encoding and streaming decode; a small VibeVoice adapter refines the
+acoustic latent before decoding. The optional verbalizer is a separately
+trained model that converts written English into a more suitable spoken form
+before synthesis.
 
 Text is tokenized primarily at the character level. Explicit text and audio
 boundaries, together with shared non-linear position IDs across codebooks, keep
@@ -282,28 +310,24 @@ cuts. The complete serialization and position-ID scheme is described in the
 
 | Predictor | Role | Transformer blocks | Width | Stored parameters |
 |---|---|---:|---:|---:|
-| CB0 | Semantic audio and duration | 28 | 2,048 | 1,829,116,930 |
+| CB0 | Semantic audio and duration | 28 | 2,048 | 1,854,352,386 |
 | CB1 | Acoustic refinement | 16 | 1,024 | 448,960,512 |
 | CB2 | Acoustic refinement | 8 | 1,024 | 327,307,264 |
 | CB3 | Acoustic refinement | 4 | 1,024 | 268,577,792 |
-| **Total** |  | **56** |  | **2,873,962,498** |
-
-### Training
-
-All four predictors were trained exclusively with supervised fine-tuning on
-approximately 200,000 hours of paired speech and text across seven languages,
-predominantly from public-domain audiobook recordings and openly released
-speech corpora.
+| **Total** |  | **56** |  | **2,899,197,954** |
 
 ### Serving performance
 
-With weights resident on one NVIDIA GeForce RTX 5090 and the process warmed,
-the streaming path reaches approximately 200 ms to first encoded audio. In
-separate non-streaming measurements, end-to-end real-time factor (RTF) is 0.08
-for one input and aggregate RTF is 0.02 across eight concurrent inputs. Startup,
-model loading, and network latency are excluded.
+With the default 4-bit model on one NVIDIA GeForce RTX 5090 and the process
+warmed, streaming reaches a median of 192 ms to first audio, and synthesis runs
+at about 13 times real time for one request and 21–23 times real time across
+batched requests (with `MAX_NUM_SEQS_PER_CB=32,32,32,32`). Startup, model
+loading, and network latency are excluded.
 
-### Evaluation
+### Evaluation (TontaubeV1)
+
+The results below were measured with TontaubeV1, the previous release, not with
+TontaubeV1.1.
 
 The LLM-as-a-judge pairwise audiobook-reading benchmark contains 400 fixed
 English passages of 250--500 characters. For each passage, Gemini 3.1 Pro
@@ -339,23 +363,20 @@ voice identity and timbre are excluded from the rubric, prosody is not fully
 separable from the reference; this asymmetry may favor TontaubeV1 in those
 three comparisons.
 
-On the 1,088 English zero-shot examples of the Seed-TTS evaluation set,
-TontaubeV1 obtains 1.66% mean utterance-level word error rate using Whisper
-large-v3 transcription at semantic sampling temperature `0.6`.
-
-These automated evaluations measure English reading prosody and text
-correctness. They do not establish voice similarity, overall sound quality,
+This automated evaluation measures English reading prosody and text
+correctness. It does not establish voice similarity, overall sound quality,
 multilingual quality, long-form continuity, or streaming quality. The
 [technical report](https://tontaube.ai/papers/tontaube-v1-technical-report.pdf)
 documents the full methodology, judge instructions, and further limitations.
 
 ## Model sources and runtime assets
 
-By default, CB0--CB3, DualCodec, W2V-BERT, and the optional verbalizer and
-VibeVoice source weights are resolved with Hugging Face Hub and cached under
-its configured cache directory. The reduced VibeVoice acoustic model produced
-from the pinned upstream snapshot is cached separately under
-`~/.cache/tontaube`.
+By default, the Tontaube model (`TontaubeAI/TontaubeV1.1-int4`, or
+`TontaubeAI/TontaubeV1.1` with the vLLM backend), DualCodec, W2V-BERT, and the
+optional verbalizer and VibeVoice source weights are resolved with Hugging Face
+Hub and cached under its configured cache directory. The reduced VibeVoice
+acoustic model produced from the pinned upstream snapshot is cached separately
+under `~/.cache/tontaube`.
 
 Set `CB0_MODEL_PATH`, `CB1_MODEL_PATH`, `CB2_MODEL_PATH`, or `CB3_MODEL_PATH`
 to override individual codebooks with local directories. Setting `MODEL_PATH`
@@ -364,6 +385,12 @@ changing where the upstream runtime models resolve. DualCodec, W2V-BERT, and
 the prepared VibeVoice acoustic model each have an independent local-path
 override. Repository and revision variables provide the corresponding remote
 overrides.
+
+Besides `cb0/`–`cb3/`, the model folder holds the CB0-CTC checkpoint
+(`cb0/cb0_ctc.pt`), which lets the server regenerate English pieces that
+skipped text, the VibeVoice adapter (`vibevoice_adapter.pt`), and in
+TontaubeV1.1-int4 the 4-bit layers (`int4/`). The server uses them
+automatically.
 
 `tontaube preflight` downloads and prepares enabled generation models, then validates all
 required files before GPU initialization. It does not download VibeVoice or the
@@ -384,19 +411,24 @@ curl --silent http://127.0.0.1:8080/predict \
     "text": "Welcome to Tontaube.",
     "language": "english",
     "tag": "conversational",
-    "temperature": 0.8,
+    "temperature": 0.7,
     "format": "wav"
   }' \
 | python3 -c 'import base64,json,sys; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["audio_b64"]))' \
 > tontaube.wav
 ```
 
-The sampling-temperature default is `0.8`. A lower value such as `0.6` favors
-correctness; values near `1.0` can produce more natural and expressive results.
-Automatic CB0 retries keep the requested temperature for the first two attempts,
-then increase it by 0.05 per attempt (up to five attempts in total).
-`use_system_tag: false` omits the language/style control block; it defaults to
-`true`, using the selected `language` and `tag`.
+The defaults are temperature `0.7` and frequency penalty `0.1`. A lower
+temperature favors correctness; a higher one can sound more expressive. Pieces
+that come out too fast or too slow, or that skip text, are regenerated
+automatically (up to five attempts in total). `use_system_tag: false` omits the
+language/style control block; it defaults to `true`, using the selected
+`language` and `tag`.
+
+The models read text one character at a time (168 supported characters, see
+`app/model/text_vocab.py`). Other Latin-script letters lose their accents, and
+other scripts, emoji, and control-token markup are removed; a request with no
+readable characters left is rejected with status 422.
 
 For voice cloning, provide one of:
 
@@ -407,7 +439,8 @@ For voice cloning, provide one of:
 When no voice source is supplied, the server uses the bundled Marcus reference.
 `prompt_max_tokens` can cap CB0 at 1--750 voice-prompt tokens; the later
 codebooks apply their own smaller caps. Reference audio should contain clean
-speech from one speaker.
+speech from one speaker; very quiet or very loud references are brought to a
+normal level before encoding.
 
 The bundled catalogue includes 39 standard voices as MP3 references across all
 seven languages, plus seven legacy audio voices. Marcus is the default.
@@ -415,26 +448,49 @@ Select a voice in the UI, or use `"voice_path": "samples/Marcus.mp3"` with
 the default bundled voice directory. Add your own audio files to
 `voices/samples/`; see [voice catalogue metadata](voices/README.md).
 
+### Style sliders
+
+TontaubeV1.1 has five style sliders. Pass them as `controls`, one step per
+slider from `0` (low end) to the highest step; a slider left out keeps the
+model's own choice:
+
+| Slider | Steps | Low end (0) | High end |
+|---|---|---|---|
+| `rate` | 0–4 | much slower | much faster |
+| `pause` | 0–4 | fewer, shorter pauses | more, longer pauses |
+| `pitch_range` | 0–5 | flat monotone | very expressive |
+| `pitch_level` | 0–4 | low, deep voice | high voice |
+| `legato` | 0–2 | crisp staccato | normal articulation |
+
+`legato` is one-sided: step 2 is the model's normal articulation and the
+crisp steps 0 and 1 also shorten pauses somewhat.
+
+```bash
+curl --silent http://127.0.0.1:8080/predict \
+  -H 'content-type: application/json' \
+  -d '{"text": "Take it slowly.", "controls": {"rate": 1, "pause": 3}, "format": "wav"}'
+```
+
+`GET /controls` lists the sliders of the loaded model. `segment_controls` sets
+them per segment of a list `text`.
+
+### Output processing and streaming
+
 Audio is synthesized at 24 kHz. By default, non-streaming `/predict` requests
 trim quiet edges to approximately 250 ms of padding, shorten quiet pauses
 longer than 2.5 seconds with a crossfade, and return 48 kHz audio using hybrid
-MossFormer2_SR_48K enhancement. The hybrid retains the source's low-frequency
-band and adds reconstructed high frequencies, using 4-second windows with
-1-second overlap. Set `trim_silence_padding_ms: null` to disable edge trimming,
-or `mossformer2_postprocess: false` to disable both enhancement and pause
-shortening. Disable both to keep the original duration and 24 kHz waveform
-before output encoding. Ogg/Opus files always use a 48 kHz playback clock.
-The enhancer's approximately 420 MiB of weights are downloaded to the standard
-Hugging Face cache on first use. Its CUDA weights and working memory are extra
-to the codebook budgets; allow GPU headroom and expect a slower first request.
+MossFormer2_SR_48K enhancement. Set `trim_silence_padding_ms: null` to disable
+edge trimming, or `mossformer2_postprocess: false` to disable both enhancement
+and pause shortening. Ogg/Opus files always use a 48 kHz playback clock. The
+enhancer's approximately 420 MiB of weights are downloaded on first use; expect
+a slower first request.
 
 For server-sent MP3 chunks, send the request to `POST /stream`.
 `WS /ws/stream` returns framed Opus audio from the 24 kHz synthesis stream.
-Streaming does not apply edge trimming, pause shortening, or MossFormer2;
-omit `mossformer2_postprocess` or set it to `false` for streaming.
-Streaming always uses VibeVoice. The `bitrate` and `priority` fields apply to
-every streaming route; `vllm_priority` is limited to non-streaming `/predict`
-calls. An explicit
+Streaming does not apply pause shortening or MossFormer2; omit
+`mossformer2_postprocess` or set it to `false` for streaming. Streaming always
+uses VibeVoice. The `bitrate` and `priority` fields apply to every streaming
+route; `vllm_priority` is limited to non-streaming `/predict` calls. An explicit
 `format` must match the transport (`mp3` for SSE, `opus` for WebSocket), or it
 may be omitted. `max_new_tokens` is the total per-chunk CB0 budget, including
 the initial silence token and any early streaming prefix, and accepts 50–400.
@@ -443,14 +499,34 @@ to 2.8 seconds and accepts 0.4–6.0 seconds in 0.4-second increments. Increasin
 it raises time to first audio but gives playback more headroom; if a custom
 `max_new_tokens` value is too small for it, the request is rejected explicitly.
 
+### Continuing from your own audio
+
+To continue or regenerate from a point inside audio you already have, send
+`prefix_text` (the text spoken up to the cut) and `prefix_tokens` (every
+codebook row of that audio's codes up to the cut frame, for example the
+`codebook_tokens` of an earlier `/predict` response). The server returns only
+the continuation, faded in over its first 10 ms. Keep your audio up to sample
+`cut_frame × 1920` (24 kHz, counted from the start of the codes' audio), fade its
+last 10 ms out, and append the
+continuation; `app/splice.py` does this:
+
+```python
+from app.splice import cut_sample, splice_continuation
+
+kept = my_audio[:cut_sample(cut_frame, sample_rate=24000)]
+joined = splice_continuation(kept, continuation_audio, sample_rate=24000)
+```
+
 ## Configuration
 
 The main runtime settings are environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `TTS_MODEL_REPO_ID` | HF repository containing `cb0/` through `cb3/`; defaults to `TontaubeAI/TontaubeV1` |
-| `TTS_MODEL_REVISION` | HF model revision; defaults to `v1.0.0` |
+| `TTS_BACKEND` | `lite` (default: the 4-bit model, GPU or CPU) or `vllm` (full precision) |
+| `TONTAUBE_TORCH_VARIANT` | PyTorch build check at start: `auto` (default), `default` (skip the check), or `cu126` (CUDA 12.6 build for older GPUs) |
+| `TTS_MODEL_REPO_ID` | HF repository containing `cb0/` through `cb3/`; defaults to `TontaubeAI/TontaubeV1.1-int4` (`TontaubeAI/TontaubeV1.1` with vLLM) |
+| `TTS_MODEL_REVISION` | HF model revision; defaults to `v1.1.0` |
 | `CB0_MODEL_PATH` ... `CB3_MODEL_PATH` | Optional per-codebook local-directory overrides |
 | `MODEL_PATH` | Optional local root containing `cb0/` through `cb3/` |
 | `DUALCODEC_MODEL_PATH` | Optional local DualCodec snapshot override |
@@ -464,6 +540,7 @@ The main runtime settings are environment variables:
 | `TONTAUBE_CACHE_DIR` | Cache for derived Tontaube runtime artifacts; defaults to `~/.cache/tontaube` |
 | `VOICE_PATH` | Inference-server folder used for server-side `voice_path` requests and relative `DEFAULT_VOICE` overrides |
 | `DEFAULT_VOICE` | Audio reference used when none is supplied; defaults to bundled `samples/Marcus.mp3`, or accepts a path relative to `VOICE_PATH` or an absolute path |
+| `VOICE_REF_LEVEL_WINDOW` | Speech-level range for voice references in dB; defaults to `-26,-14`, `off` disables it |
 | `REQUIRE_API_KEY` | Require an `x-api-key` header; defaults to `0` |
 | `TTS_API_KEY` | Shared secret used when authentication is enabled |
 | `TTS_CORS_ORIGINS` | Comma-separated browser origins allowed to call the API; defaults to the local UI on port 3000 |
@@ -479,13 +556,8 @@ The main runtime settings are environment variables:
 | `VERBALIZATION_MODEL_REPO_ID` | HF verbalizer repository; defaults to `TontaubeAI/TontaubeV1-Verbalizer` |
 | `VERBALIZATION_MODEL_REVISION` | HF verbalizer revision; defaults to `v1.0.0` |
 | `VERBALIZATION_MODEL_PATH` | Optional local verbalizer-directory override |
-| `VERBALIZATION_GPU_MEMORY_GIB` | Verbalizer vLLM memory budget; defaults by profile to `4.8`, `5.0`, or `5.5` GiB |
-| `VERBALIZATION_MAX_NUM_SEQS` | Optional verbalizer concurrency override |
-| `TTS_CAPACITY_PROFILE` | `low-vram`, `balanced` (default), or `high-throughput` |
-| `GPU_MEMORY_GIB_PER_CB` | Four comma-separated vLLM memory budgets |
-| `MAX_MODEL_LEN_PER_CB` | Four comma-separated context limits |
+| `TTS_CAPACITY_PROFILE` | `minimal`, `low-vram` (default with lite), `balanced` (default with vLLM), or `high-throughput` |
 | `MAX_NUM_SEQS_PER_CB` | Four comma-separated active-sequence limits |
-| `MAX_NUM_BATCHED_TOKENS_PER_CB` | Four comma-separated scheduler token budgets |
 | `MAX_INFLIGHT_REQUESTS` | End-to-end request limit; defaults to twice the CB0 active-sequence limit |
 
 To enable API-key authentication, provide both settings:
@@ -493,11 +565,11 @@ To enable API-key authentication, provide both settings:
 ```bash
 docker run --rm --gpus all --ipc=host \
   -p 127.0.0.1:8080:8080 \
-  -v /absolute/path/to/tontaube-v1-models:/srv/models:ro \
+  -v /absolute/path/to/tontaube-models:/srv/models:ro \
   -e MODEL_PATH=/srv/models \
   -e REQUIRE_API_KEY=1 \
   -e TTS_API_KEY="replace-with-a-secret" \
-  tontaube-v1:1.0.0
+  tontaube:1.1.0
 ```
 
 To enable the verbalizer, set `ENABLE_VERBALIZATION=1`. It must resolve and load
@@ -505,13 +577,58 @@ successfully at startup, and individual requests must also set
 `"use_verbalization": true`. Such a request returns an explicit error when the
 verbalizer is unavailable or the requested language is not English. When
 verbalization is disabled, the model is not loaded.
-Its active-sequence limit is 4 for `low-vram`, 10 for `balanced`, and 16 for
-`high-throughput`.
 
-### Capacity tuning
+## Lite backend
 
-All per-codebook variables are ordered `cb0,cb1,cb2,cb3`. Select a profile with
-`TTS_CAPACITY_PROFILE`; `balanced` is the conservative release default:
+The default backend runs all four codebook models in the API process with
+weight-only 4-bit layers, CUDA graphs, and a paged KV cache. It loads in about
+4 GiB of GPU memory and peaks at about 6.5 GiB (long texts, encoding a voice
+reference for cloning, MossFormer2 enhancement); the optional verbalizer adds
+1.9 GiB. It serves the same API as the vLLM backend.
+
+| Variable | Purpose |
+|---|---|
+| `LITE_QUANT` | `auto` (default: the model folder's `int4/` bundle, else `bf16`), a bundle directory, or a plan string |
+| `LITE_DEVICE` | `cuda` or `cpu`; defaults to the GPU when one is available |
+| `LITE_CPU_THREADS` | Threads on the CPU; default one per physical core |
+| `LITE_KV_TOKENS_PER_CB` | Paged KV pool per codebook in tokens; default `max_model_len * max_num_seqs` |
+| `LITE_FMA_KERNELS` | Decode kernels for GPUs without tensor cores: `auto` (default: on GPUs below compute capability 7.0, such as Pascal), `on` (every GPU), or `off` (never; the tensor-core kernels everywhere) |
+
+To build your own bundle (for example int8), quantize the full-precision model
+once on a GPU that can hold it (about 12 GiB), then serve the bundle with it:
+
+```bash
+uv run tontaube quantize --preset int8 --out ~/tontaube-int8
+TTS_MODEL_REPO_ID=TontaubeAI/TontaubeV1.1 LITE_QUANT=~/tontaube-int8 uv run tontaube serve
+```
+
+A bundle records which weights it was quantized from, and the server refuses
+to load it onto other weights. Plan strings such as `int8g128` (see
+`app/lite/plans.py`) are quantized at startup and also need the full-precision
+model.
+
+### CPU-only inference
+
+On a Linux x86-64 machine without a GPU (or with `LITE_DEVICE=cpu`), the same
+command runs the 4-bit model on the CPU. It needs AVX2, FMA, and F16C and a C++
+compiler; the kernels in `app/native/` are compiled on first start and cached in
+`TONTAUBE_CACHE_DIR`. Speed is bound by memory bandwidth: a 12-core desktop CPU
+with dual-channel DDR4 synthesizes at about real time, so a long stream can
+pause between chunks. MossFormer2 is off by default on the CPU. The verbalizer
+needs a GPU; leave `ENABLE_VERBALIZATION` unset on a machine without one.
+
+## vLLM backend
+
+`TTS_BACKEND=vllm` serves the full-precision `TontaubeAI/TontaubeV1.1` with one
+vLLM engine per codebook, for higher throughput on larger GPUs. It needs an
+NVIDIA GPU with at least 24 GiB of VRAM for the `low-vram` or default `balanced`
+profile, and at least 32 GiB for `high-throughput`:
+
+```bash
+TTS_BACKEND=vllm TTS_CAPACITY_PROFILE=low-vram uv run tontaube serve
+```
+
+All per-codebook variables are ordered `cb0,cb1,cb2,cb3`:
 
 | Profile | Active sequences (CB0--CB3) | End-to-end requests | GPU memory in GiB (CB0--CB3) | Batched tokens (CB0--CB3) |
 |---|---|---|---|---|
@@ -519,44 +636,14 @@ All per-codebook variables are ordered `cb0,cb1,cb2,cb3`. Select a profile with
 | `balanced` | 3, 8, 8, 8 | 6 | 4.900, 2.470, 1.920, 1.590 | 7,500, 16,000, 19,200, 24,000 |
 | `high-throughput` | 8, 20, 20, 20 | 16 | 6.954, 5.204, 3.728, 3.250 | 20,000, 40,000, 48,000, 60,000 |
 
-The budgets aim to retain request-time and compilation headroom. A clean-cache
-low-VRAM startup was validated on an RTX 5090 with vLLM, TorchInductor, Triton,
-and CUDA caches isolated. The resulting full-context capacities were:
-
-| Profile | Measured capacity (CB0--CB3) | Reserve above active limits |
-|---|---|---|
-| `low-vram` | 1.28, 4.72, 4.76, 4.55 | 28.0%, 18.0%, 19.0%, 13.8% |
-
-The fractional “Maximum concurrency for N tokens per request” printed by vLLM
-is the measured KV-cache capacity divided by `N`. For every profile, each
-batched-token budget equals the corresponding context limit multiplied by its
-active-sequence limit. This invariant lets every configured active sequence fit
-in one prefill scheduler step. Lower budgets can split prefills and produce
-incorrect logical-position assignment with the current model adapter.
-
-Later starts can report more capacity because vLLM reuses its compilation
-caches. Treat a clean-cache result as the conservative measurement. If the
-first cold start runs out of memory, one follow-up attempt may work after some
-caches have been populated; lower the GiB budgets for reliable cold starts.
-
-Profiles are starting points, not GPU-model detection. `low-vram` is intended
-for the lowest supported concurrency and `balanced` for the release default;
-both require at least 24 GiB of VRAM. `high-throughput` requires at least
-32 GiB. Explicit
-`GPU_MEMORY_GIB_PER_CB`, `MAX_NUM_SEQS_PER_CB`,
-`MAX_NUM_BATCHED_TOKENS_PER_CB`, and `MAX_INFLIGHT_REQUESTS` values override
-the selected profile. Unless overridden, the end-to-end request limit remains
-twice the configured CB0 active-sequence limit.
-
-For example:
-
-```bash
-TTS_CAPACITY_PROFILE=high-throughput \
-uv run tontaube serve
-```
-
-Memory left for DualCodec, VibeVoice, CUDA, and request-time tensors must not be
-assigned to the vLLM engines. Load-test custom values on the target GPU.
+`GPU_MEMORY_GIB_PER_CB`, `MAX_MODEL_LEN_PER_CB`, `MAX_NUM_SEQS_PER_CB`,
+`MAX_NUM_BATCHED_TOKENS_PER_CB`, `MAX_INFLIGHT_REQUESTS`, and
+`VERBALIZATION_GPU_MEMORY_GIB` override the profile. Keep each batched-token
+budget equal to the context limit times the active-sequence limit, so every
+active sequence fits in one prefill step, and leave memory unassigned for
+DualCodec, VibeVoice, CUDA, and request-time tensors. The first clean-cache
+start may use more memory while vLLM compiles kernels; lower the budgets if it
+runs out of memory, and load-test custom values on the target GPU.
 
 ## Development
 
@@ -587,9 +674,8 @@ Autoregressive generation can omit, repeat, or alter text and can terminate
 too early or too late. Reference conditioning may reproduce incidental
 recording properties or imperfectly preserve identity. Quality varies by
 language, speaker, style, and text domain. The optional verbalizer can
-normalize incorrectly or alter wording. Training emphasized audiobook speech,
-so audiobook generation may be more reliable than conversational or agentic
-generation.
+normalize incorrectly or alter wording. Audiobook generation may be more
+reliable than conversational or agentic generation.
 
 English and German are the primary languages. German phoneme realization can
 be imperfect, and Spanish, French, Italian, Dutch, and Portuguese have not been
@@ -608,12 +694,11 @@ put it behind TLS and appropriate request/rate limits.
 
 ## Roadmap
 
-We are working on quantized releases that reduce inference-memory requirements.
-We also plan to publish fine-tuning code in a future release.
+We plan to publish fine-tuning code in a future release.
 
 ## Acknowledgements
 
-TontaubeV1 builds on [Qwen3](https://github.com/QwenLM/Qwen3),
+Tontaube builds on [Qwen3](https://github.com/QwenLM/Qwen3),
 [DualCodec](https://github.com/jiaqili3/DualCodec), and
 [VibeVoice](https://github.com/microsoft/VibeVoice). Their respective licenses
 and attribution requirements continue to apply.
@@ -633,5 +718,5 @@ The Apache License does not apply to model weights, tokenizer or codec weights
 and data, configuration files distributed with those model artifacts, or other
 separately distributed model artifacts. Tontaube-owned model materials are
 licensed separately under the
-[Tontaube Community Model License 1.0](https://huggingface.co/TontaubeAI/TontaubeV1/blob/v1.0.0/LICENSE);
+[Tontaube Community Model License 1.0](https://huggingface.co/TontaubeAI/TontaubeV1.1/blob/v1.1.0/LICENSE);
 third-party model artifacts remain subject to their respective licenses.

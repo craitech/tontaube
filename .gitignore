@@ -28,3 +28,6 @@ dist/
 
 # Downloaded runtime artifacts
 models/
+
+# Local experiments
+/experiments/

@@ -20,6 +20,13 @@ from app.third_party.clearvoice_mossformer2_sr import Generator, Mossformer
 
 logger = get_logger("mossformer2")
 
+# Keep the weights in pinned host memory and move them to the GPU only while
+# a request is being enhanced (default for the lite backend).
+_HOST_RESIDENT = os.getenv(
+    "LITE_MOSSFORMER_OFFLOAD",
+    "1" if os.getenv("TTS_BACKEND", "lite").strip().lower() == "lite" else "0",
+) == "1"
+
 MOSSFORMER2_SAMPLE_RATE = 48_000
 _MODEL_REPO_ID = os.getenv(
     "MOSSFORMER2_SR_REPO_ID",
@@ -150,9 +157,11 @@ class MossFormer2Postprocessor:
     """Lazily loaded, serialized MossFormer2_SR_48K inference runtime."""
 
     def __init__(self, *, chunk_seconds: float = 4.0) -> None:
-        if not torch.cuda.is_available():
-            raise RuntimeError("MossFormer2 postprocessing requires CUDA")
-        self.device = torch.device("cuda", torch.cuda.current_device())
+        # Without CUDA this runs on the CPU (correct, but about 3x real time).
+        self.device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available() else torch.device("cpu")
+        )
         logger.info("Loading MossFormer2_SR_48K on %s", self.device)
 
         self.model_m = Mossformer()
@@ -162,12 +171,28 @@ class MossFormer2Postprocessor:
         self.model_m.to(self.device).eval()
         self.model_g.to(self.device).eval()
         self.model_g.remove_weight_norm()
+        self._resident = None
+        if _HOST_RESIDENT and self.device.type == "cuda":
+            from contextlib import ExitStack
+
+            from app.codec.offload import HostResident
+
+            residents = (HostResident(self.model_m, self.device), HostResident(self.model_g, self.device))
+
+            def resident():
+                stack = ExitStack()
+                for r in residents:
+                    stack.enter_context(r)
+                return stack
+
+            self._resident = resident
+            torch.cuda.empty_cache()
 
         self.chunk_samples = round(chunk_seconds * MOSSFORMER2_SAMPLE_RATE)
         self.overlap_samples = self.chunk_samples // 4
         self.stride_samples = self.chunk_samples - self.overlap_samples
         self._process_lock = Lock()
-        logger.info("MossFormer2_SR_48K ready: %.1fs windows, %.1fs overlap; 2.5s pause cap, no muting",
+        logger.info("MossFormer2_SR_48K ready: %.1fs windows, %.1fs overlap; 2.5s pause cap",
                     chunk_seconds, self.overlap_samples / MOSSFORMER2_SAMPLE_RATE)
 
     def _enhance_chunk(self, chunk: np.ndarray) -> np.ndarray:
@@ -222,13 +247,18 @@ class MossFormer2Postprocessor:
         output /= np.maximum(weights, np.finfo(np.float64).eps)
         return output[:original_length].astype(np.float32)
 
-    def process(self, audio, input_sample_rate: int) -> torch.Tensor:
+    def process(self, audio, input_sample_rate: int, *, headroom_db: float = 0.0) -> torch.Tensor:
         # A single model instance is shared by request workers. Serializing this
         # bounded-memory stage avoids concurrent activation spikes on the GPU.
+        # headroom_db: the OUTPUT_HEADROOM_DB already applied to `audio` (the
+        # pause cap lowers its fixed thresholds by it).
         with self._process_lock:
-            return self._process(audio, input_sample_rate)
+            if self._resident is None:
+                return self._process(audio, input_sample_rate, headroom_db=headroom_db)
+            with self._resident():
+                return self._process(audio, input_sample_rate, headroom_db=headroom_db)
 
-    def _process(self, audio, input_sample_rate: int) -> torch.Tensor:
+    def _process(self, audio, input_sample_rate: int, *, headroom_db: float = 0.0) -> torch.Tensor:
         source = (
             audio.detach()
             .float()
@@ -239,9 +269,9 @@ class MossFormer2Postprocessor:
         )
         # Match the tested order: cap on the original waveform, then resample
         # and enhance. Existing boundary trimming happens in /predict first.
-        source, removed, cuts = clip_long_pauses(source, input_sample_rate)
+        source, removed, cuts = clip_long_pauses(source, input_sample_rate, headroom_db=headroom_db)
         if cuts:
-            logger.info("Pause cap: shortened %d quiet runs to 2.5s; removed %.3fs; no muting",
+            logger.info("Pause cap: shortened %d quiet runs to 2.5s; removed %.3fs",
                         cuts, removed / input_sample_rate)
         if input_sample_rate != MOSSFORMER2_SAMPLE_RATE:
             source = librosa.resample(

@@ -52,10 +52,11 @@ def test_codebooks_default_to_hf_subfolders(monkeypatch, tmp_path):
     assert paths == tuple(str(tmp_path / "snapshot" / f"cb{i}") for i in range(4))
     assert calls == [
         (
-            "TontaubeAI/TontaubeV1",
-            "v1.0.0",
+            model_sources.DEFAULT_MODEL_REPO_ID,
+            "v1.1.0",
             model_sources.MODEL_REPOSITORY_FILES
-            + ("cb0/**", "cb1/**", "cb2/**", "cb3/**"),
+            + ("cb0/**", "cb1/**", "cb2/**", "cb3/**")
+            + ("int4/**",),
         )
     ]
 

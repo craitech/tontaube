@@ -167,6 +167,18 @@ class TestSplitLongText:
             "a" * 25,
         ]
 
+    def test_prefers_sentence_end_over_later_comma(self):
+        text = "a" * 200 + ". " + "b" * 100 + ", " + "c" * 80
+        assert split_long_text(text) == ["a" * 200 + ".", "b" * 100 + ", " + "c" * 80]
+
+    def test_sentence_end_too_early_falls_back_to_comma(self):
+        text = "a" * 50 + ". " + "b" * 250 + ", " + "c" * 80
+        assert split_long_text(text) == ["a" * 50 + ". " + "b" * 250 + ",", "c" * 80]
+
+    def test_wordless_piece_is_attached(self):
+        text = "a" * (MAX_TEXT_CHARS_PER_CHUNK - 1) + '."'
+        assert split_long_text(text) == text
+
     def test_can_reserve_four_units_per_digit(self):
         assert split_long_text(
             "abc1defgh",

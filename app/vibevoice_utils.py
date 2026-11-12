@@ -12,14 +12,29 @@ from app.logging_utils import get_logger
 logger = get_logger("vibevoice")
 
 
-def load_vibevoice_tokenizer(model_path: str, device: str | None = None):
-    """Load VibeVoice acoustic tokenizer model onto the specified device."""
+def load_vibevoice_tokenizer(model_path: str, device: str | None = None, cpu_quant: str = "int8g128"):
+    """Load VibeVoice acoustic tokenizer model onto the specified device.
+
+    On the CPU this is app.codec.vibevoice_cpu.CpuVibeVoice (channels-last AVX2 kernels,
+    fp32 compute, `cpu_quant` weights for the wide FFNs and convolutions), with
+    the reference model as the fallback where the kernels cannot be built.
+    """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        try:
+            from app.codec.vibevoice_cpu import CpuVibeVoice
+
+            tokenizer = CpuVibeVoice(model_path, ffn_quant=cpu_quant, conv_quant=cpu_quant)
+            logger.info("VibeVoice on the CPU: %s weights, %.0f MiB", cpu_quant, tokenizer.nbytes() / 2**20)
+            _warmup_vibevoice(tokenizer, device)
+            return tokenizer
+        except Exception:
+            logger.exception("CPU VibeVoice kernels unavailable; using the reference model in fp32")
     # Zen 3 / pre-Sapphire-Rapids CPUs have no native bf16 — fp32 wins on CPU.
     dtype = torch.bfloat16 if device != "cpu" else torch.float32
     tokenizer = VibeVoiceAcousticTokenizerModel.from_pretrained(
-        model_path, torch_dtype=dtype,
+        model_path, dtype=dtype,
     )
     tokenizer = tokenizer.to(device).eval()
     tokenizer._tontaube_dtype = dtype
@@ -200,7 +215,7 @@ class VVDecodeEngine:
 
         # active entries: (remaining_frames [1, T_i, D], slot, accumulated_chunks, future)
         active = [
-            (frames.to(device, dtype=torch.bfloat16), slot, [], future)
+            (frames.to(device, dtype=_vv_dtype(self.vv_tokenizer)), slot, [], future)
             for frames, slot, future in batch
             if not future.cancelled()
         ]

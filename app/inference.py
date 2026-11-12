@@ -1,27 +1,26 @@
-"""Core TTS inference using vLLM."""
+"""Core TTS pipeline: text segments, prompts, codebook engines (app/engines.py), codec, retries."""
 import asyncio
+import gc
+import hashlib
+import math
 import os
 import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
-os.environ.setdefault('VLLM_WORKER_MULTIPROC_METHOD', 'spawn')
 os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
-
-from vllm import SamplingParams, TokensPrompt
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.config import CompilationConfig
-from vllm.config.compilation import CUDAGraphMode
 
 from app.config import (
     ServerConfig,
     END_OF_SPEECH,
     TEXT_MARKER,
     AUDIO_MARKER,
+    UTT_END,
+    UTT_CONT,
     SEMANTIC_VOCAB_SIZE,
     ACOUSTIC_VOCAB_SIZE,
     DUALCODEC_SAMPLE_RATE,
@@ -38,8 +37,23 @@ from app.config import (
     STREAMING_SECONDS_QUANTUM,
     build_system_prompt,
 )
-from app.model.vllm_model import get_codebook_offset
+from app.model.positions import get_codebook_offset
+from app.controls import ControlCatalog, render_system_tag
+from app.cb0_ctc import normalize_text
+from app.text import strip_special_token_strings
+from app.cb0_guard import (
+    PrevAudioChain,
+    RateWindow,
+    SegmentGuard,
+    load_recognizer,
+    longest_run,
+    parse_cb0_header,
+    retry_seed,
+)
+from app.quality_gate import build_quality_gate
 from app.utils import (
+    check_boundary_tokens,
+    check_cb0_window_ids,
     load_tokenizer,
     tokenize_text,
     encode_voice_prompt,
@@ -49,32 +63,39 @@ from app.utils import (
     get_dc_inference,
     free_memory,
 )
-from app.dualcodec_utils import decode_chunked_with_context, split_at_markers, VV_HZ
+from app.dualcodec_utils import (
+    decode_chunked_with_context, split_at_markers, VV_HZ, VV_HOP_SAMPLES, code_samples, finish_request_end,
+    apply_output_headroom, decode_with_prefix_context, start_fade,
+)
+from app.stream_lead_trim import trim_stream_lead
+from app.stream_early_check import EARLY_LEAD_SILENCE_TOKEN, active_fraction
+from app.vv_adapter import (
+    CONTEXT_CODES as VV_ADAPTER_CONTEXT_CODES, DC_HZ as VV_ADAPTER_DC_HZ, N_ACOUSTIC as VV_ADAPTER_N_ACOUSTIC,
+    activate_vv_adapter, check_grid,
+    VV_ADAPTER_FILE, check_stream_lookahead, correct_stream_frames, load_vv_adapter, stream_tail_audio,
+)
 from app.vibevoice_utils import (
     load_vibevoice_tokenizer,
     vv_encode,
     vv_decode_streaming,
     VVDecodeEngine,
 )
-from app.model.vllm_plugin import register as register_vllm_model
 from app.model_sources import (
     read_codebook_metadata,
     resolve_codebook_model_paths,
     resolve_runtime_model_paths,
     resolve_verbalizer_model_path,
 )
+from app.engines import SamplingParams, TokensPrompt, build_codebook_engines, shutdown_engine
 from app.logging_utils import get_logger
 
 logger = get_logger("inference")
-
-register_vllm_model()
-
 
 @dataclass
 class _CodebookCtx:
     """Resolved token IDs and engine for a single codebook."""
     tokenizer: object
-    engine: AsyncLLMEngine
+    engine: object
     n_codebooks: int
     pad_id: int
     dc_base_id: int
@@ -116,16 +137,32 @@ def _extract_acoustic_codes(
 class TTSEngine:
     def __init__(self, config: ServerConfig):
         self.config = config
-        self.engines: list[AsyncLLMEngine] = []
+        self.engines: list = []
         self.tokenizers: list = []
         self.dc_inference = None
         self.vv_tokenizer = None
         self.vv_engine: VVDecodeEngine | None = None
+        self.vv_adapter = None  # VV_ADAPTER_CKPT (app/vv_adapter.py); None = off
+        # End tokens: the CB0 bundle's (<|utt_end|>, <|utt_cont|>) ids when it declares them; None = a legacy bundle.
+        self.boundary_token_ids: tuple[int, int] | None = None
         self.prompt_semantic = None
         self.prompt_acoustic = None
         self._voice_prompt_cache: OrderedDict[str, tuple[list, list]] = OrderedDict()
         self._voice_prompt_cache_max = 128
         self.verbalizer = None
+        # Slider catalog of a control-enabled CB0 bundle (controls.json), else None.
+        self.controls: ControlCatalog | None = None
+        # app/cb0_guard.py: rate factors for the chars/s window and the chunk length,
+        # and the CB0-CTC guard's recogniser (loaded in load()); None = off.
+        rate_factors = (
+            RateWindow.from_config(config)
+            if config.cb0_rate_aware_cps or config.cb0_rate_aware_chunk_chars else None
+        )
+        self.rate_window = rate_factors if config.cb0_rate_aware_cps else None
+        self.rate_chunk_window = rate_factors if config.cb0_rate_aware_chunk_chars else None
+        self.cb0_ctc = None
+        # app/quality_gate.py: the /predict quality gate (built in load()); None = off.
+        self.quality_gate = None
 
     def _n_codebooks(self) -> int:
         return len(self.engines)
@@ -157,14 +194,30 @@ class TTSEngine:
         system_tag: str = '',
         lookahead_chars: int | None = 50,
         boundary_total_segments: int | None = None,
+        restart: bool = False,
+        boundary_tokens: bool = False,
+        drop_space: bool = False,
     ) -> tuple[str, int, int]:
-        """Build text window for a segment.  Returns (window_text, win_start, win_end)."""
+        """Build text window for a segment.  Returns (window_text, win_start, win_end).
+
+        ``restart`` (with ``use_context``; CB0_DROP_BAD_PREV_AUDIO): a window shaped
+        like segment 0's but starting at ``seg_idx``: the segment plus the next one's lookahead,
+        no previous text. Boundary cues stay those of the segment's real position.
+
+        ``boundary_tokens`` (CB0 only; ServerConfig.cb0_boundary_tokens): a token window. The
+        segment ``seg_idx`` ends in UTT_END if it is the request's last, else in UTT_CONT; no
+        segment gets the trailing '\\n', and the previous text and the lookahead carry no token.
+        ``drop_space`` (token windows only): no leading ' ' on any segment, and none between a
+        prefix and the window.
+        """
+        if drop_space and not boundary_tokens:
+            raise ValueError("drop_space applies to token windows only; legacy windows never change")
         n = len(segments)
         boundary_total = n if boundary_total_segments is None else boundary_total_segments
         if not use_context:
             win_start, win_end = seg_idx, seg_idx + 1
-        elif seg_idx == 0:
-            win_start, win_end = 0, min(2, n)
+        elif seg_idx == 0 or restart:
+            win_start, win_end = seg_idx, min(seg_idx + 2, n)
         else:
             win_start = max(0, seg_idx - 1)
             win_end = min(seg_idx + 2, n)
@@ -184,16 +237,19 @@ class TTSEngine:
 
         for local_idx, segment in enumerate(win_segs):
             global_idx = win_start + local_idx
-            if global_idx > 0:
+            if global_idx > 0 and not drop_space:
                 segment = ' ' + segment
-            if global_idx == boundary_total - 1:
-                segment += '\n'
+            if not boundary_tokens:
+                if global_idx == boundary_total - 1:
+                    segment += '\n'
+            elif global_idx == seg_idx:
+                segment += UTT_END if global_idx == boundary_total - 1 else UTT_CONT
             win_segs[local_idx] = segment
 
-        # Every non-initial chunk already carries its one leading space.
+        # Every non-initial chunk already carries its one leading space (none under drop_space).
         window_text = TEXT_MARKER.join(win_segs)
         if prefix:
-            separator = '' if window_text.startswith((' ', '\n')) else ' '
+            separator = '' if drop_space or window_text.startswith((' ', '\n')) else ' '
             window_text = prefix['text'].strip() + TEXT_MARKER + separator + window_text
         window_text = system_tag + window_text
         return window_text, win_start, win_end
@@ -228,7 +284,7 @@ class TTSEngine:
         temperature = temperature if temperature is not None else self.config.temperature
         top_p = top_p if top_p is not None else self.config.top_p
         top_k = top_k if top_k is not None else self.config.top_k
-        frequency_penalty = frequency_penalty if frequency_penalty is not None else 0.0
+        frequency_penalty = frequency_penalty if frequency_penalty is not None else self.config.frequency_penalty
         if use_system_tag:
             system_prompt = build_system_prompt(language, tag)
             system_tag = f'<|im_start|>{system_prompt}<|im_end|>\n'
@@ -266,6 +322,69 @@ class TTSEngine:
         )
         return sampling, voice_prompt, system_tag, acoustic_temperature, acoustic_top_k
 
+    def _cb0_system_tags(
+        self,
+        system_tag: str,
+        n_segments: int,
+        language: str,
+        tag: str,
+        use_system_tag: bool,
+        controls=None,
+        segment_controls: list | None = None,
+    ) -> tuple[str, list[str]]:
+        """CB0 system headers with slider tokens: (request-level tag, one tag per segment).
+
+        CB1-3 keep ``system_tag`` unchanged. Without controls both equal ``system_tag``.
+        """
+        if controls is None and segment_controls is None:
+            return system_tag, [system_tag] * n_segments
+        if self.controls is None:
+            raise ValueError(
+                "slider controls need a CB0 bundle with controls.json (set CB0_MODEL_PATH)"
+            )
+        if not use_system_tag:
+            raise ValueError("slider controls need use_system_tag=True (they live in the header)")
+        if segment_controls is not None and len(segment_controls) != n_segments:
+            raise ValueError(
+                f"segment_controls has {len(segment_controls)} entries for {n_segments} segments"
+            )
+        system_prompt = build_system_prompt(language, tag)
+        request_tag = render_system_tag(system_prompt, self.controls.render(controls))
+        segment_tags = [
+            render_system_tag(
+                system_prompt,
+                self.controls.render(self.controls.merge(
+                    controls, segment_controls[i] if segment_controls is not None else None,
+                )),
+            )
+            for i in range(n_segments)
+        ]
+        return request_tag, segment_tags
+
+    def chunk_char_scales(
+        self,
+        n_segments: int,
+        language: str,
+        tag: str,
+        use_system_tag: bool,
+        controls=None,
+        segment_controls: list | None = None,
+    ) -> list[float] | None:
+        """Per-segment scale (<= 1) of the text splitter's chunk lengths, so slow-rate
+        pieces stay within the CB0 token cap: the rate factor of each segment's CB0 header (as for
+        the chars/s window), capped at 1. None = unscaled (flag off or no sliders).
+        """
+        if self.rate_chunk_window is None or (controls is None and segment_controls is None):
+            return None
+        try:
+            _, tags = self._cb0_system_tags(
+                "", n_segments, language, tag, use_system_tag,
+                controls=controls, segment_controls=segment_controls,
+            )
+        except ValueError:
+            return None  # reported after splitting (app.main._require_controls)
+        return [min(1.0, self.rate_chunk_window.factor(*parse_cb0_header(t)[1:])) for t in tags]
+
     async def _resolve_prefix(
         self,
         prefix_text: str | None,
@@ -277,10 +396,15 @@ class TTSEngine:
         acoustic_top_k: int,
         system_tag: str = '',
         silence_logit_bias: float | None = None,
+        semantic_system_tag: str | None = None,
     ) -> tuple[dict | None, dict[int, list[int]]]:
         """Generate or load prefix context. Returns (prefix_dict, prefix_acoustic_codes)."""
+        # End tokens: the client's prefix text is not sanitized; strip literal <|...|> strings only.
+        prefix_text = strip_special_token_strings(prefix_text) if prefix_text else prefix_text
         if not prefix_text:
             return None, {}
+        if semantic_system_tag is None:
+            semantic_system_tag = system_tag
 
         ctx0 = self._cb_ctx(0)
         n_codebooks = self._n_codebooks()
@@ -307,7 +431,7 @@ class TTSEngine:
             logger.debug("Generating context prefix for %r", prefix_text)
             prefix_sem_codes, _ = await self._generate_semantic(
                 [prefix_text], sampling=sampling, voice_prompt=voice_prompt,
-                max_new_tokens=max_new_tokens, system_tag=system_tag,
+                max_new_tokens=max_new_tokens, system_tag=semantic_system_tag,
                 silence_logit_bias=silence_logit_bias,
             )
             prev_pfx_acoustic: list[list[int]] = []
@@ -430,8 +554,13 @@ class TTSEngine:
         dc_hz: float,
         chunk_s: float,
         flush: bool = False,
+        vv_adapter=None,
     ) -> tuple['torch.Tensor | None', int]:
-        """DC decode -> VV encode -> VV decode. Returns (audio_chunk_or_None, new_total_vv_emitted)."""
+        """DC decode -> VV encode -> VV decode. Returns (audio_chunk_or_None, new_total_vv_emitted).
+
+        vv_adapter (STREAM_VV_ADAPTER, _stream_vv_adapter): corrects the new VibeVoice frames before the decode
+        (app/vv_adapter.correct_stream_frames); the flush gets /predict's tail fix and keeps its length with the adapter
+        off. None: unchanged."""
         pad = self.config.streaming_dc_pad_tokens
         effective_dc = len(state.accumulated_sem) - pad
 
@@ -445,13 +574,51 @@ class TTSEngine:
         else:
             target_vv_frames = None  # emit all remaining
 
+        # Re-encode from `first_token` on. Without a configured context this is
+        # the whole stream; with one, decoding starts that many seconds before
+        # the first unemitted frame (and no later than the VibeVoice adapter's
+        # left context). Emission boundaries are whole 0.4 s units (5 DualCodec
+        # tokens = 3 VibeVoice frames), so frame indices map exactly.
+        first_token = 0
+        context_s = self.config.streaming_decode_context_seconds
+        if context_s is not None and total_vv_emitted % 3 == 0:
+            first_token = max(0, total_vv_emitted * 5 // 3 - int(round(context_s * dc_hz)))
+            if vv_adapter is not None:
+                first_token = min(first_token, max(0, total_vv_emitted // 3 * 5 - VV_ADAPTER_CONTEXT_CODES))
+            first_token -= first_token % 5
+        frame_offset = first_token * 3 // 5
         with torch.no_grad():
-            audio = codes_to_audio_tensor(self.dc_inference, state.accumulated_sem, state.accumulated_ac)
+            audio = codes_to_audio_tensor(
+                self.dc_inference,
+                state.accumulated_sem[first_token:],
+                [codes[first_token:] for codes in state.accumulated_ac],
+            )
+        n_codes = len(state.accumulated_sem)
+        if not n_codes:
+            vv_adapter = None  # no codes, nothing to correct (as /predict)
+        tail_frames_off = None
+        if flush and vv_adapter is not None:
+            # the adapter's tail fix: encode the codes' audio padded to the adapter's frame grid (3 * ceil(K / 5)
+            # frames); the encoder alone pads the last, partial frame (ceil), which is the flush's length without it
+            tail_frames_off = frame_offset - (-audio.shape[-1] // VV_HOP_SAMPLES)
+            audio = stream_tail_audio(audio, n_codes - first_token)
         frames = vv_encode(self.vv_tokenizer, audio)
 
+        def new_frames(end: int) -> torch.Tensor:
+            """The stream's frames [total_vv_emitted, end) to decode: the encoder's, or corrected by the adapter."""
+            if vv_adapter is None or end <= total_vv_emitted:
+                return frames[:, total_vv_emitted - frame_offset:end - frame_offset]
+            return correct_stream_frames(
+                vv_adapter, self.dc_inference, state.accumulated_sem, state.accumulated_ac, audio, frames,
+                total_vv_emitted, end, final=flush, first_code=first_token,
+            )
+
         if flush:
-            audio_chunk = await self.vv_engine.decode(frames[:, total_vv_emitted:], vv_slot)
-            new_emitted = frames.shape[1]
+            audio_chunk = await self.vv_engine.decode(new_frames(frame_offset + frames.shape[1]), vv_slot)
+            if tail_frames_off is not None and not self.config.decode_end_fix:
+                # the flush's length with the adapter off (with DECODE_END_FIX the caller ends it at the codes' length)
+                audio_chunk = audio_chunk[..., :max(0, tail_frames_off - total_vv_emitted) * VV_HOP_SAMPLES]
+            new_emitted = frame_offset + frames.shape[1]
         else:
             logger.debug(
                 "Streaming decode: %d DualCodec tokens, VibeVoice frames %d:%d",
@@ -459,9 +626,7 @@ class TTSEngine:
                 total_vv_emitted,
                 target_vv_frames,
             )
-            audio_chunk = await self.vv_engine.decode(
-                frames[:, total_vv_emitted:target_vv_frames], vv_slot,
-            )
+            audio_chunk = await self.vv_engine.decode(new_frames(target_vv_frames), vv_slot)
             new_emitted = target_vv_frames
 
         if audio_chunk.shape[-1] > 0:
@@ -480,7 +645,22 @@ class TTSEngine:
             for ac in acoustic_codes:
                 ac.extend([0] * n_silence)
 
+    def _checked_vv_adapter(self, path: str, sha256: str):
+        vv_adapter = load_vv_adapter(path, sha256, self.config.vv_adapter_allow_unlisted)
+        check_grid("the decode context (chunk_context_seconds)",
+                   int(self.config.chunk_context_seconds * VV_ADAPTER_DC_HZ))
+        if self.config.stream_vv_adapter:
+            check_stream_lookahead(vv_adapter, self.config.streaming_dc_pad_tokens)
+        return vv_adapter
+
     async def load(self):
+        # VV_ADAPTER_CKPT: check the VibeVoice adapter before anything else loads (the file,
+        # VV_ADAPTER_SHA256, the approved list, the checkpoint format; app/vv_adapter.py), so a bad setting stops the
+        # server in seconds, not after the vLLM startup. The checked model waits on the CPU until VibeVoice is loaded.
+        vv_adapter = None
+        if self.config.vv_adapter_ckpt:
+            vv_adapter = self._checked_vv_adapter(self.config.vv_adapter_ckpt, self.config.vv_adapter_sha256)
+
         # Load verbalization model first (fast, surfaces config errors early)
         if self.config.enable_verbalization:
             from app.verbalizer import Verbalizer
@@ -492,12 +672,20 @@ class TTSEngine:
                 verbalizer_path,
                 gpu_util=self.config.verbalization_gpu_util,
                 max_num_seqs=self.config.verbalization_max_num_seqs,
+                growth_guard=self.config.verbalizer_growth_guard,
+                backend=self.config.backend,
+                lite_quant=self.config.lite_verbalizer_quant,
             )
             logger.info("Verbalization model loaded")
 
         model_paths = list(
             resolve_codebook_model_paths(self.config.codebook_model_dirs)
         )
+        bundled_adapter = Path(model_paths[0]).parent / VV_ADAPTER_FILE
+        if vv_adapter is None and not self.config.vv_adapter_ckpt and bundled_adapter.is_file():
+            # the model root's decoder adapter: accepted only if its hash is on the approved list
+            sha = hashlib.sha256(bundled_adapter.read_bytes()).hexdigest()
+            vv_adapter = self._checked_vv_adapter(str(bundled_adapter), sha)
         runtime_paths = resolve_runtime_model_paths(
             include_vibevoice=self.config.enable_vibevoice
         )
@@ -517,6 +705,27 @@ class TTSEngine:
                     f"{expected_n_codebooks} for this stack"
                 )
             tokenizer = load_tokenizer(model_path)
+            if cb == 0:
+                self.controls = ControlCatalog.load(model_path)
+                if self.controls is not None:
+                    self.controls.check_tokenizer(tokenizer)
+                    logger.info("CB0 slider controls: %s", self.controls.describe())
+            boundary_ids = check_boundary_tokens(
+                model_path, tokenizer, cb,
+                slider_tokens=sorted(self.controls.all_tokens) if cb == 0 and self.controls is not None else (),
+            )
+            if cb == 0:
+                self.boundary_token_ids = boundary_ids
+                if self.config.cb0_boundary_tokens and boundary_ids is None:
+                    raise ValueError(
+                        f"CB0_BOUNDARY_TOKENS=1 needs a CB0 bundle that declares the boundary rows; "
+                        f"{model_path} has no boundary_tokens.json"
+                    )
+                if boundary_ids is not None:
+                    logger.info(
+                        "CB0 boundary tokens %s (token windows %s)", boundary_ids,
+                        "on" if self.config.cb0_boundary_tokens else "off",
+                    )
 
             self.tokenizers.append(tokenizer)
             logger.debug(
@@ -544,59 +753,82 @@ class TTSEngine:
             logger.debug("DualCodec weights converted to float16")
         else:
             logger.debug("DualCodec using float32 on CPU")
+        if self.config.backend == "lite":
+            self._slim_semantic_model()
+
+        # CB0-CTC recogniser for the CB0 retry guard (CB0_CTC_GUARD, on by default).
+        self.cb0_ctc = load_recognizer(self.config, model_paths[0])
+        # /predict quality gate (PREDICT_QUALITY_GATE=1, opt-in; needs the recogniser).
+        if self.config.predict_quality_gate:
+            self.quality_gate = build_quality_gate(self.config, self.cb0_ctc, self.rate_window)
 
         # Encode the default voice prompt once for the shared stack.
         self.prompt_semantic, self.prompt_acoustic = self._encode_default_prompt(
             self.dc_inference, len(self.config.codebook_model_dirs),
         )
 
-        gpu_mem_fracs = self.config.gpu_memory_per_cb
-        max_num_seqs = self.config.max_num_seqs_per_cb
-        max_num_batched_tokens = self.config.max_num_batched_tokens_per_cb
-        logger.info(
-            "Initializing %d vLLM engines with the %s capacity profile",
-            len(model_paths),
-            self.config.capacity_profile_name,
-        )
-
-        engine_tasks = []
-        for cb, model_dir_name in enumerate(self.config.codebook_model_dirs):
-            max_len = self.config.max_model_len_per_cb[cb]
-            gpu_mem = gpu_mem_fracs[cb]
-            logger.info(
-                "CB%d: context=%d, active_sequences=%d, batched_tokens=%d, GPU fraction=%.3f",
-                cb,
-                max_len,
-                max_num_seqs[cb],
-                max_num_batched_tokens[cb],
-                gpu_mem,
-            )
-            engine_tasks.append(self._init_async_engine(
-                model_paths[cb],
-                target_codebook=cb,
-                max_model_len=max_len,
-                gpu_memory_utilization=gpu_mem,
-                scheduling_policy="priority",
-                max_num_seqs=max_num_seqs[cb],
-                max_num_batched_tokens=max_num_batched_tokens[cb],
-            ))
-
-        self.engines = list(await asyncio.gather(*engine_tasks))
+        self.engines = await build_codebook_engines(self.config, model_paths, self.tokenizers)
 
         # Load VibeVoice acoustic tokenizer for postprocessing (shared).
         if self.config.enable_vibevoice:
             logger.info("Loading VibeVoice acoustic tokenizer")
             if runtime_paths.vibevoice is None:
                 raise RuntimeError("VibeVoice was enabled but its model did not resolve")
-            self.vv_tokenizer = load_vibevoice_tokenizer(runtime_paths.vibevoice)
+            self.vv_tokenizer = load_vibevoice_tokenizer(
+                runtime_paths.vibevoice, cpu_quant=self.config.lite_vibevoice_quant)
+            if self.config.backend == "lite":
+                self._quantize_vibevoice()
             self.vv_engine = VVDecodeEngine(
                 self.vv_tokenizer,
                 max_queue_size=self.config.max_vv_decode_queue_size,
             )
             self.vv_engine.start()
             logger.info("VibeVoice acoustic tokenizer loaded")
+            if vv_adapter is not None:
+                self.vv_adapter = activate_vv_adapter(
+                    vv_adapter, self.vv_tokenizer.device, stream=self.config.stream_vv_adapter,
+                )
+        elif vv_adapter is not None:
+            logger.warning("VV_ADAPTER_CKPT is set but VibeVoice is disabled: the adapter is not loaded")
 
+        # Optional classifier-free guidance on the voice prompt for CB1-3 (CFG_WEIGHT_PER_CB, default off)
+        if any(w > 0 for w in self.config.cfg_weight_per_cb[1:]):
+            from app.cfg_acoustic import maybe_attach
+            maybe_attach(self, model_paths, self.config.cfg_weight_per_cb)
+
+        if self.config.backend == "lite":
+            free_memory()  # return loading/quantization temporaries to the driver
+        # The loaded stack lives for the whole process: keep its ~0.5M objects out of
+        # the cyclic GC so per-request gc.collect() calls only scan new objects.
+        gc.freeze()
         logger.info("Tontaube server ready with %d codebooks", len(self.engines))
+
+    def _slim_semantic_model(self) -> None:
+        """Drop unused W2V-BERT layers; optionally stream the rest from host memory."""
+        from app.codec.w2v import offload_semantic_model, truncate_semantic_model
+
+        dropped = truncate_semantic_model(self.dc_inference)
+        offload = self.config.lite_offload_w2v and torch.cuda.is_available()
+        if offload:
+            offload_semantic_model(self.dc_inference)
+        free_memory()
+        logger.info(
+            "W2V-BERT: dropped %d unused layers%s",
+            dropped,
+            "; encoder layers stream from host memory during voice encodes" if offload else "",
+        )
+
+    def _quantize_vibevoice(self) -> None:
+        from app.codec.vibevoice_quant import quantize_vibevoice
+        from app.lite.plans import parse_spec
+        from app.vibevoice_utils import _warmup_vibevoice
+
+        spec = parse_spec(self.config.lite_vibevoice_quant)
+        if spec.bits == 16 or self.vv_tokenizer.device.type != "cuda":
+            return  # the quantized FFN kernels are GPU kernels
+        n, saved = quantize_vibevoice(self.vv_tokenizer, spec)
+        _warmup_vibevoice(self.vv_tokenizer, self.vv_tokenizer.device)
+        logger.info("VibeVoice: %d FFN layers as %s (-%.0f MiB)", n, spec, saved / 2**20)
 
     def _encode_default_prompt(self, dc_inference, gen_n_codebooks: int):
         if not os.path.exists(self.config.default_voice):
@@ -612,81 +844,10 @@ class TTSEngine:
             gen_n_codebooks,
         )
 
-    async def _init_async_engine(
-        self,
-        model_path: str,
-        target_codebook: int,
-        max_model_len: int,
-        gpu_memory_utilization: float = 0.2,
-        max_num_seqs: int | None = 8,
-        max_num_batched_tokens: int | None = None,
-        scheduling_policy: str = "fcfs",
-    ) -> AsyncLLMEngine:
-        logger.debug("Loading CB%d with vLLM from %s", target_codebook, model_path)
-
-        # CPU-only path: no GPU memory fraction, no CUDA graphs / inductor.
-        # vllm-cpu rejects compilation_config and gpu_memory_utilization.
-        if not torch.cuda.is_available():
-            engine_args = AsyncEngineArgs(
-                model=model_path,
-                dtype="bfloat16",
-                hf_overrides={
-                    "architectures": ["Qwen3DualCodecForCausalLM"],
-                    "target_codebook": target_codebook,
-                },
-                max_model_len=max_model_len,
-                max_num_seqs=max_num_seqs or 4,
-                max_num_batched_tokens=max_num_batched_tokens,
-                enforce_eager=True,
-                enable_prefix_caching=False,
-                disable_log_stats=True,
-                scheduling_policy=scheduling_policy,
-            )
-            return AsyncLLMEngine.from_engine_args(engine_args)
-
-        # Dense capture at small batch sizes (always used) + sparser capture up
-        # to max_num_seqs so high-concurrency decode steps don't fall back to
-        # piecewise execution. Each captured size costs ~7 MiB VRAM.
-        effective_max_seqs = max_num_seqs or 8
-        capture_sizes = [s for s in (1, 2, 3, 4, 5, 6, 7, 8) if s <= effective_max_seqs]
-        for s in (12, 16, 20, 24, 28, 32, 40, 48, 56, 64):
-            if s <= effective_max_seqs and s not in capture_sizes:
-                capture_sizes.append(s)
-        if effective_max_seqs not in capture_sizes:
-            capture_sizes.append(effective_max_seqs)
-
-        compilation_config = CompilationConfig(
-            cudagraph_mode=CUDAGraphMode.FULL,
-            cudagraph_capture_sizes=capture_sizes,
-        )
-
-        attention_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
-
-        engine_args = AsyncEngineArgs(
-            model=model_path,
-            dtype="bfloat16",
-            hf_overrides={
-                "architectures": ["Qwen3DualCodecForCausalLM"],
-                "target_codebook": target_codebook,
-            },
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            enforce_eager=False,
-            enable_prefix_caching=False,
-            enable_chunked_prefill=True,
-            disable_log_stats=True,
-            max_num_batched_tokens=max_num_batched_tokens,
-            compilation_config=compilation_config,
-            scheduling_policy=scheduling_policy,
-            **({'max_num_seqs': max_num_seqs} if max_num_seqs is not None else {}),
-            **({'attention_backend': attention_backend} if attention_backend else {}),
-        )
-
-        return AsyncLLMEngine.from_engine_args(engine_args)
 
     async def _generate_with_engine(
         self,
-        engine: AsyncLLMEngine,
+        engine,
         prompt_ids: list[int],
         sampling_params: SamplingParams,
         priority: int = 0,
@@ -737,7 +898,12 @@ class TTSEngine:
         tag: str = DEFAULT_TAG,
         use_system_tag: bool = True,
         vllm_priority: int | None = None,
+        controls: dict | str | None = None,
+        segment_controls: list | None = None,
     ):
+        """``controls``: request-level sliders ({name: bin} or a control-token string);
+        ``segment_controls``: one entry per text segment, merged over ``controls``
+        (see app/controls.py). Both only affect the CB0 header."""
         start_time = time.time()
 
         sampling, voice_prompt, system_tag, acoustic_temperature, acoustic_top_k = self._resolve_params(
@@ -750,13 +916,28 @@ class TTSEngine:
         )
         effective_vv_tokenizer = None if vibevoice_postprocess is False else self.vv_tokenizer
         segments = [text] if isinstance(text, str) else list(text)
+        cb0_system_tag, cb0_segment_tags = self._cb0_system_tags(
+            system_tag, len(segments), language, tag, use_system_tag,
+            controls=controls, segment_controls=segment_controls,
+        )
 
         prefix, prefix_acoustic_codes = await self._resolve_prefix(
             prefix_text, prefix_tokens, sampling, voice_prompt,
             max_new_tokens, acoustic_temperature, acoustic_top_k,
             system_tag=system_tag, silence_logit_bias=silence_logit_bias,
+            semantic_system_tag=cb0_system_tag,
         )
         n_codebooks = self._n_codebooks()
+
+        # PREDICT_QUALITY_GATE: the request's quality gate (None = off).
+        gate_request = (
+            self.quality_gate.new_request(
+                sampling.get('seed'), voice_prompt, len(segments), self.config.cb0_max_retries,
+            )
+            if self.quality_gate is not None else None
+        )
+        gate_passes: list = []
+        gate_kept_pass = None
 
         base_temperature = sampling.get('temperature', 0.8)
         for _rms_attempt in range(1, self.config.cb0_max_retries + 1):
@@ -770,15 +951,20 @@ class TTSEngine:
             attempt_sampling['temperature'] = (
                 base_temperature + (_rms_attempt - 1) * self.config.vv_retry_temperature_step
             )
+            if gate_request is not None:
+                # quality gate: a fresh base seed per request-level pass (pass 1 keeps the request seed)
+                attempt_sampling['seed'] = gate_request.begin_pass(_rms_attempt)
 
             semantic_codes, marker_indices = await self._generate_semantic(
                 segments, sampling=attempt_sampling, voice_prompt=voice_prompt,
                 prefix=prefix,
                 max_new_tokens=max_new_tokens,
-                system_tag=system_tag,
+                system_tag=cb0_system_tag,
+                segment_system_tags=cb0_segment_tags,
                 vllm_priority=resolved_priority,
                 silence_logit_bias=silence_logit_bias,
                 use_context=True,
+                **({'quality_gate': gate_request} if gate_request is not None else {}),
             )
 
             acoustic_codes = []
@@ -803,8 +989,20 @@ class TTSEngine:
                 prev_acoustic.append(cb_codes)
 
             # Strip prefix from output
+            prefix_codes = None
             if prefix:
                 prefix_len = len(prefix['semantic_codes'])
+                if self.config.prefix_joint_decode:
+                    # PREFIX_JOINT_DECODE: keep the last chunk_context_seconds of the prefix codes as the
+                    # decoder's left context. Only for a client splice: every codebook row passed in prefix_tokens and
+                    # none shorter than the prefix (no generated or zero-padded prefix audio decoded before the join).
+                    if prefix_tokens and len(prefix_tokens) >= n_codebooks and all(
+                            len(prefix_tokens[cb]) >= prefix_len for cb in range(1, n_codebooks)):
+                        ctx = min(prefix_len, round(self.config.chunk_context_seconds * DUALCODEC_HZ))
+                        prefix_codes = (semantic_codes[prefix_len - ctx:prefix_len],
+                                        [ac[prefix_len - ctx:prefix_len] for ac in acoustic_codes])
+                    else:
+                        logger.info("Prefix joint decode skipped: prefix_tokens missing or incomplete")
                 semantic_codes = semantic_codes[prefix_len:]
                 acoustic_codes = [ac[prefix_len:] for ac in acoustic_codes]
                 marker_indices = [m - prefix_len for m in marker_indices[1:]]
@@ -817,17 +1015,38 @@ class TTSEngine:
             dc_hz = DUALCODEC_HZ
             short_audio = len(semantic_codes) / dc_hz < 60
             free_memory()
-            audio_tensor = decode_chunked_with_context(
-                self.dc_inference, effective_vv_tokenizer,
-                semantic_codes, acoustic_codes,
-                hz=dc_hz,
-                context_seconds=self.config.chunk_context_seconds,
-            )
+            if prefix_codes is not None:
+                audio_tensor = decode_with_prefix_context(
+                    self.dc_inference, effective_vv_tokenizer,
+                    prefix_codes[0], prefix_codes[1],
+                    semantic_codes, acoustic_codes,
+                    hz=dc_hz,
+                    context_seconds=self.config.chunk_context_seconds,
+                    end_fix=self.config.decode_end_fix,
+                    end_fade_ms=self.config.decode_end_fade_ms,
+                    vv_adapter=self.vv_adapter,
+                    window_seconds=self.config.decode_window_seconds,
+                )
+            else:
+                audio_tensor = decode_chunked_with_context(
+                    self.dc_inference, effective_vv_tokenizer,
+                    semantic_codes, acoustic_codes,
+                    hz=dc_hz,
+                    context_seconds=self.config.chunk_context_seconds,
+                    end_fix=self.config.decode_end_fix,
+                    end_fade_ms=self.config.decode_end_fade_ms,
+                    vv_adapter=self.vv_adapter,
+                    window_seconds=self.config.decode_window_seconds,
+                )
 
             if short_audio:
                 retry_reason = self._check_audio_quality(audio_tensor)
                 if retry_reason is None:
                     break
+                if gate_request is not None:
+                    gate_passes.append(self._gate_pass_record(
+                        _rms_attempt, retry_reason, audio_tensor, semantic_codes, acoustic_codes, gate_request,
+                    ))
                 logger.warning(
                     "Generation quality retry %d/%d: %s",
                     _rms_attempt,
@@ -836,6 +1055,30 @@ class TTSEngine:
                 )
             else:
                 break
+        else:
+            if gate_request is not None and gate_passes:
+                # quality gate: no pass passed the request-level check: keep the best pass, not the last one
+                best_pass = min(gate_passes, key=lambda r: r['rank'])
+                audio_tensor, semantic_codes, acoustic_codes = (
+                    best_pass['audio'], best_pass['semantic'], best_pass['acoustic'],
+                )
+                gate_kept_pass = best_pass['pass']
+                logger.warning(
+                    "Quality gate: no pass passed the request check; keeping pass %d of %d (%s)",
+                    best_pass['pass'], len(gate_passes), best_pass['reason'],
+                )
+        if gate_request is not None:
+            n_passes = len(gate_passes) + (0 if gate_kept_pass is not None else 1)
+            gate_request.finish(
+                gate_kept_pass if gate_kept_pass is not None else n_passes, n_passes,
+                [r['reason'] for r in gate_passes],
+            )
+
+        # OUTPUT_HEADROOM_DB: fixed output gain on the final decode (VibeVoice,
+        # or DualCodec with VibeVoice off), after DECODE_END_FIX and before main.py's trim / pause cap /
+        # MossFormer2 / int16 export. Applied after the silence retry check so retry decisions are unchanged.
+        # In place on the fresh decode tensor (no copy); 0 dB leaves it untouched.
+        audio_tensor = apply_output_headroom(audio_tensor, self.config.output_headroom_db, inplace=True)
 
         end_time = time.time()
         processing_time = end_time - start_time
@@ -858,6 +1101,39 @@ class TTSEngine:
         codebook_tokens = [semantic_codes] + acoustic_codes
         return audio_tensor, codebook_tokens
 
+    def _early_retry_sampling(self, sampling: dict, attempt: int) -> dict:
+        """STREAM_EARLY_CHECK: a fresh sample for early attempt >= 2 (/predict's retry temperature step and another seed)."""
+        retry = dict(sampling)
+        retry["temperature"] = sampling["temperature"] + (attempt - 1) * self.config.vv_retry_temperature_step
+        if sampling.get("seed") is not None:
+            retry["seed"] = sampling["seed"] + attempt - 1
+        return retry
+
+    def _early_chunk_rejection(
+        self, early_cb0: list[int], early_audio: 'torch.Tensor | None', early_target_vv: int, n_chars: int,
+    ) -> str | None:
+        """STREAM_EARLY_CHECK: why the early chunk must not be played, or None.
+
+        The early CB0 check with 12794 counted as silence; on the decoded audio of the part that would be played, /predict's
+        silent-audio check, the active-speech floor (STREAM_EARLY_MIN_ACTIVE) and the optional pace floor
+        (STREAM_EARLY_PACE_MIN_ACTIVE, 0 = off).
+        """
+        reason = self._check_cb0_generation(
+            len(early_cb0), n_chars, False, DUALCODEC_HZ, codes=early_cb0, early_mode=True,
+        )
+        if reason is not None or early_audio is None:
+            return reason
+        played = early_audio[..., :early_target_vv * VV_HOP_SAMPLES]
+        reason = self._check_audio_quality(played)
+        if reason is not None:
+            return reason
+        active = active_fraction(played)
+        if active < self.config.stream_early_min_active:
+            return f"near_silent (active {active:.2f} < {self.config.stream_early_min_active:.2f})"
+        if active < self.config.stream_early_pace_min_active:
+            return f"slow_start (active {active:.2f} < {self.config.stream_early_pace_min_active:.2f})"
+        return None
+
     @staticmethod
     def _check_audio_quality(
         audio_tensor: 'torch.Tensor',
@@ -879,6 +1155,20 @@ class TTSEngine:
             return f"silent (RMS={post_vv_rms:.6f})"
         return None
 
+    @staticmethod
+    def _gate_pass_record(pass_idx, reason, audio_tensor, semantic_codes, acoustic_codes, gate_request) -> dict:
+        """Quality gate: one request-level pass that failed ``_check_audio_quality``, with its ranking
+        key (best first): finite non-empty audio, fewest kept pieces at the CB0 cap, fewest gate flags on the kept
+        pieces, lowest max logistic p, highest RMS, earliest."""
+        post = audio_tensor.float().cpu()
+        bad = post.numel() == 0 or not torch.isfinite(post).all().item()
+        rms = 0.0 if bad else post.pow(2).mean().sqrt().item()
+        caps, flags, maxp = gate_request.pass_rank()
+        return {
+            'pass': pass_idx, 'reason': reason, 'audio': audio_tensor, 'semantic': list(semantic_codes),
+            'acoustic': [list(a) for a in acoustic_codes], 'rank': (bad, caps, flags, maxp, -rms, pass_idx),
+        }
+
     def _resolve_voice_prompt(
         self,
         voice_audio_b64: str | None,
@@ -899,8 +1189,13 @@ class TTSEngine:
     def _check_cb0_generation(
         self, n_tokens: int, n_chars: int, hit_max_tokens: bool, hz: float,
         codes: list[int] | None = None, early_mode: bool = False,
+        cps_scale: float = 1.0, max_cps: float | None = None,
     ) -> str | None:
-        """Return failure reason string, or None if generation is acceptable."""
+        """Return failure reason string, or None if generation is acceptable.
+
+        ``cps_scale`` scales both chars/s bounds (rate-aware window, app/cb0_guard.py); ``max_cps`` replaces
+        cb0_max_cps as the upper bound (_cb0_max_cps).
+        """
         if hit_max_tokens and not early_mode:
             return "max_tokens_reached"
         # When token cap is expected (early chunk), skip CPS/min_tokens — only check silence
@@ -910,16 +1205,77 @@ class TTSEngine:
             if n_tokens > 0 and n_chars > 30:
                 duration = n_tokens / hz
                 cps = n_chars / duration
-                if cps < self.config.cb0_min_cps or cps > self.config.cb0_max_cps:
+                min_cps = self.config.cb0_min_cps * cps_scale
+                max_cps = (max_cps or self.config.cb0_max_cps) * cps_scale
+                if cps < min_cps or cps > max_cps:
+                    if cps_scale != 1.0:
+                        return f"cps_out_of_range (cps={cps:.1f}, window {min_cps:.1f}-{max_cps:.1f})"
                     return f"cps_out_of_range (cps={cps:.1f})"
         if codes and self.config.cb0_max_silence_ratio > 0:
             check = codes[:50]
             silence_set = set(SILENCE_TOKEN_IDS)
+            if self.config.cb0_silence_count_digital:
+                silence_set.add(DC_SILENCE_TOKEN)  # digital silence
+            if early_mode and self.config.stream_early_check:
+                silence_set.add(EARLY_LEAD_SILENCE_TOKEN)  # STREAM_EARLY_CHECK: the model's own lead-silence code
             n_silence = sum(1 for c in check if c in silence_set)
             ratio = n_silence / len(check)
             if ratio > self.config.cb0_max_silence_ratio:
                 return f"too_much_silence ({n_silence}/{len(check)} = {ratio:.0%})"
+        if codes and not early_mode and self.config.cb0_gap_check and self.config.cb0_max_gap_seconds > 0:
+            # Whole-piece gap check. The check above sees only the first 50 codes, so it misses a long silence
+            # later in the piece. Same silence measure (the early-silence check's code set), over the whole piece;
+            # an early streaming chunk is not a whole piece and keeps the checks above only.
+            gap_set = set(SILENCE_TOKEN_IDS)
+            if self.config.cb0_silence_count_digital:
+                gap_set.add(DC_SILENCE_TOKEN)
+            gap_s = longest_run(codes, gap_set) / hz
+            if gap_s > self.config.cb0_max_gap_seconds:
+                return f"long_gap ({gap_s:.2f}s > {self.config.cb0_max_gap_seconds:g}s)"
         return None
+
+    def _cps_window_distance(
+        self, n_tokens: int, n_chars: int, hz: float, cps_scale: float = 1.0, max_cps: float | None = None,
+    ) -> float:
+        """STREAM_RETRY_FIX: how far an attempt's chars/s lies outside the CB0 window (log ratio; 0 inside)."""
+        if n_tokens <= 0 or n_chars <= 0:
+            return math.inf
+        cps = n_chars / (n_tokens / hz)
+        min_cps = self.config.cb0_min_cps * cps_scale
+        max_cps = (max_cps or self.config.cb0_max_cps) * cps_scale
+        if cps < min_cps:
+            return math.log(min_cps / cps)
+        if cps > max_cps:
+            return math.log(cps / max_cps)
+        return 0.0
+
+    def _cb0_max_cps(self, system_tag: str) -> float:
+        """Chars/s upper bound for the style in a CB0 header (cb0_max_cps_by_style, else cb0_max_cps)."""
+        return self.config.cb0_max_cps_by_style.get(parse_cb0_header(system_tag)[1] or "", self.config.cb0_max_cps)
+
+    def _cb0_segment_checks(
+        self, system_tag: str, text: str, early_mode: bool,
+    ) -> tuple[float, SegmentGuard | None]:
+        """(chars/s window scale, CB0-CTC guard or None) for one CB0 segment.
+
+        Both follow the segment's CB0 header: the rate slider bin and style pick the scale; the
+        guard runs for the languages the recogniser knows, never on an early streaming chunk
+        (it covers only part of the text) or a text without letters.
+        """
+        language, style, rate_bin = parse_cb0_header(system_tag)
+        cps_scale = self.rate_window.factor(style, rate_bin) if self.rate_window is not None else 1.0
+        guard = None
+        if (
+            self.config.cb0_ctc_guard
+            and self.cb0_ctc is not None
+            and not early_mode
+            and language in self.config.cb0_ctc_guard_languages
+            and normalize_text(text)
+        ):
+            digits = any(ch.isdigit() for ch in text)
+            max_cer = self.config.cb0_ctc_digit_max_cer if digits else self.config.cb0_ctc_max_cer
+            guard = SegmentGuard(self.cb0_ctc, text, max_cer, self.config.cb0_ctc_max_retries)
+        return cps_scale, guard
 
     async def _generate_semantic_segment(
         self,
@@ -939,6 +1295,10 @@ class TTSEngine:
         boundary_total_segments: int | None = None,
         silence_logit_bias: float | None = None,
         use_context: bool | None = None,
+        prev_audio: PrevAudioChain | None = None,
+        restart_context: bool = False,
+        stream_retry_fix: bool = False,
+        quality_gate=None,
     ) -> tuple[list[int], bool]:
         """Core semantic generation for one segment.
 
@@ -950,6 +1310,17 @@ class TTSEngine:
             in output with audio_marker (streaming non-final segments).
         silence_logit_bias: optional per-request base bias for the CB0
             collapse-silence group. The configured retry-step adjustment is added.
+        prev_audio: the request's previous-audio chain (CB0_DROP_BAD_PREV_AUDIO): a
+            retry of a non-speech attempt drops ``prev_chunk_global`` and the previous text
+            (the window is rebuilt without context), and the kept attempt's CB0-CTC CER is
+            recorded so a failed segment is not passed on as previous audio.
+        restart_context: generate like a chunk start at ``seg_idx`` (the chain dropped the
+            previous segment): no previous audio, a segment-0-shaped window starting here
+            (``_text_window(restart=True)``). The non-speech retry rebuilds the same window.
+        quality_gate: the /predict request's ``RequestGate`` (PREDICT_QUALITY_GATE;
+            app/quality_gate.py) or None. When it gates this piece it makes the
+            retry decision after serving's own check (instead of the CB0-CTC guard), sets each
+            attempt's seed, and picks the kept attempt.
         """
         ctx = self._cb_ctx(0)
         n_segs = len(segments)
@@ -957,31 +1328,62 @@ class TTSEngine:
         if use_context is None:
             use_context = prev_chunk_global is not None or seg_idx == 0
         window_text, win_start, win_end = self._text_window(
-            seg_idx, segments, use_context=use_context,
+            seg_idx, segments, use_context=use_context or restart_context,
             prefix=prefix, system_tag=system_tag,
-            boundary_total_segments=boundary_total_segments,
+            boundary_total_segments=boundary_total_segments, restart=restart_context,
+            boundary_tokens=self.config.cb0_boundary_tokens,
+            drop_space=self.config.cb0_boundary_drop_space,
         )
         text_ids = tokenize_text(window_text, ctx.tokenizer)
+        check_cb0_window_ids(window_text, text_ids, self.boundary_token_ids, self.config.cb0_boundary_tokens)
 
         vp_cap = self.config.prompt_max_tokens_per_cb[0] if self.config.prompt_max_tokens_per_cb else None
         prompt_semantic = voice_prompt[0][:vp_cap] if voice_prompt[0] and vp_cap else voice_prompt[0]
 
-        force_silence = self.config.force_first_silence and seg_idx == 0 and not forced_prefix
+        force_silence = (self.config.force_first_silence and seg_idx == 0 and not forced_prefix
+                         and not (prefix and not self.config.prefix_force_first_silence))
         silence_token = ctx.dc_base_id + SILENCE_TOKEN_ID
 
         last_is_marker = False
         last_is_eos = False
         semantic_only: list[int] = []
+        cps_scale, guard = self._cb0_segment_checks(system_tag, segments[seg_idx], early_mode)
+        max_cps = self._cb0_max_cps(system_tag)
+        digits = sum(ch.isdigit() for ch in segments[seg_idx])
+        cps_chars = len(segments[seg_idx]) + (self.config.cb0_cps_digit_weight - 1) * digits
+        passed = False
+        failed_attempts: list[tuple[list[int], bool, bool, str]] = []
+        failure = None  # the last attempt's failure (None: it passed)
+        gate = (
+            quality_gate.piece(seg_idx, segments[seg_idx], system_tag, early_mode)
+            if quality_gate is not None else None
+        )
+        n_attempts = self.config.cb0_max_retries if gate is None else gate.attempt_cap
 
-        for attempt in range(1, self.config.cb0_max_retries + 1):
+        for attempt in range(1, n_attempts + 1):
+            # Serving's retry schedule (temperature / silence bias) steps once per attempt; with the
+            # quality gate only after serving's own failures (a gate retry keeps the base values).
+            retry_steps = attempt - 1 if gate is None else gate.retry_steps
             # Keep the first retry at base temperature; increase only after it.
             # Reset from the requested base for every segment; never mutate the
             # shared sampling dictionary or compound increases across segments.
             attempt_sampling = {
                 **sampling,
                 "temperature": sampling["temperature"]
-                + max(0, attempt - 2) * self.config.cb0_retry_temperature_step,
+                + max(0, retry_steps - 1) * self.config.cb0_retry_temperature_step,
             }
+            if gate is not None:
+                # the gate's seed schedule; pass-through pieces (gate None) take the branches below
+                attempt_sampling["seed"] = gate.seed(attempt)   # fresh seed per retry
+            elif stream_retry_fix and attempt > 1 and sampling.get("seed") is not None:
+                # STREAM_RETRY_FIX: a fresh sample per retry. With the request's seed and attempt 1's temperature,
+                # attempt 2 repeats attempt 1, and later attempts stay correlated. Streaming keeps this schedule
+                # (one reseed per attempt, never both).
+                attempt_sampling["seed"] = sampling["seed"] + attempt - 1
+            elif "seed" in sampling:
+                # A fresh seed per retry. With the request seed on every attempt (and the first retry at base
+                # temperature) attempt 2 would regenerate attempt 1 exactly. Attempt 1 keeps the request seed.
+                attempt_sampling["seed"] = retry_seed(sampling["seed"], attempt)
             raw_accumulated = []
             if force_silence:
                 raw_accumulated.append(silence_token)
@@ -1044,7 +1446,7 @@ class TTSEngine:
                 )
                 collapse_silence_bias = (
                     base_collapse_silence_bias
-                    + (attempt - 1) * self.config.cb0_silence_logit_bias_step
+                    + retry_steps * self.config.cb0_silence_logit_bias_step
                 )
                 logit_bias = {ctx.eos_id: self.config.cb0_eos_logit_bias}
                 for sid in COLLAPSE_SILENCE_TOKEN_IDS:
@@ -1112,19 +1514,110 @@ class TTSEngine:
 
             hit_max = not hit_eos and not last_is_marker
             failure = self._check_cb0_generation(
-                len(semantic_only), len(segments[seg_idx]), hit_max, ctx.hz,
-                codes=semantic_codes_local, early_mode=early_mode,
+                len(semantic_only), cps_chars, hit_max, ctx.hz,
+                codes=semantic_codes_local, early_mode=early_mode, cps_scale=cps_scale, max_cps=max_cps,
             )
+            if gate is not None:
+                # the quality gate decides (it replaces the guard's retry decision)
+                failure = await gate.check(
+                    failure, semantic_codes_local, (semantic_only, last_is_eos, last_is_marker),
+                    seed=attempt_sampling.get("seed"),
+                )
+            elif failure is None and guard is not None:
+                failure = await guard.check(
+                    semantic_codes_local, (semantic_only, last_is_eos, last_is_marker),
+                )
             if failure is None:
+                passed = True
                 break
+            failed_attempts.append((semantic_only, last_is_eos, last_is_marker, failure))
             logger.warning(
                 "CB0 segment %d retry %d/%d: %s (temperature=%.2f)",
                 seg_idx,
                 attempt,
-                self.config.cb0_max_retries,
+                n_attempts,
                 failure,
                 attempt_sampling["temperature"],
             )
+            if (
+                prev_audio is not None and guard is not None and prev_chunk_global
+                and (await guard.score(semantic_codes_local))[1]
+            ):
+                # after non-speech output the same previous audio mostly runs away again:
+                # retry like a chunk start, without the previous segment's text as well.
+                prev_chunk_global = None
+                window_text, win_start, win_end = self._text_window(
+                    seg_idx, segments, use_context=True,
+                    prefix=prefix, system_tag=system_tag,
+                    boundary_total_segments=boundary_total_segments, restart=True,
+                    boundary_tokens=self.config.cb0_boundary_tokens,
+                    drop_space=self.config.cb0_boundary_drop_space,
+                )
+                text_ids = tokenize_text(window_text, ctx.tokenizer)
+                check_cb0_window_ids(
+                    window_text, text_ids, self.boundary_token_ids, self.config.cb0_boundary_tokens)
+                logger.warning(
+                    "CB0 segment %d: non-speech attempt (empty CB0-CTC transcript); "
+                    "retrying without previous audio and text",
+                    seg_idx,
+                )
+
+        best = guard.best() if guard is not None else None
+        if best is not None and best[0] is not semantic_only:
+            # Guard retries spent or attempts exhausted: keep the lowest-CER serving-ok attempt.
+            semantic_only, last_is_eos, last_is_marker = best
+            logger.warning(
+                "CB0 segment %d: keeping the serving-ok attempt with the lowest CB0-CTC CER",
+                seg_idx,
+            )
+        # Never ship a rejected piece silently. The fallback is unchanged (the lowest-CER serving-ok attempt,
+        # else the last attempt), but a kept attempt that failed a check is labelled.
+        shipped_failure = failure
+        if gate is None and best is None and stream_retry_fix and not passed and not early_mode and failed_attempts:
+            # STREAM_RETRY_FIX: every attempt failed and there is no CB0-CTC best: keep the attempt whose chars/s is
+            # closest to the window, not the last (hottest) one.
+            closest = min(failed_attempts, key=lambda a: self._cps_window_distance(
+                len(a[0]), cps_chars, ctx.hz, cps_scale, max_cps))
+            if closest[0] is not semantic_only:
+                semantic_only, last_is_eos, last_is_marker, shipped_failure = closest
+                semantic_codes_local = [t - ctx.dc_base_id for t in semantic_only]
+                logger.warning(
+                    "CB0 segment %d: all attempts failed; keeping the one closest to the chars/s window", seg_idx,
+                )
+        if gate is not None:
+            # the accepted attempt, else the best one by the gate's ranking (logged by the gate)
+            semantic_only, last_is_eos, last_is_marker = await gate.finish(
+                (semantic_only, last_is_eos, last_is_marker),
+            )
+            # the gate's check() returns None on every stop, so `failure` cannot label its pieces; a piece
+            # kept without the gate's acceptance (best-ranked, best of the serving failures, last) ships labelled.
+            summary = gate.request.pieces[-1]
+            shipped_failure = None if summary["kept_how"] == "accepted" else (
+                f"quality_gate {summary['kept_how']} (stop: {summary['stop']}; "
+                f"fired: {', '.join(summary['kept_fired']) or 'none'})"
+            )
+        elif best is not None:
+            best_cer = guard.best_cer()
+            shipped_failure = (
+                f"ctc_cer ({best_cer:.2f} > {guard.max_cer:g})" if best_cer > guard.max_cer else None
+            )
+        if shipped_failure is not None:
+            logger.warning(
+                "CB0 segment %d: FAIL-SHIPPED after %d attempts: %s",
+                seg_idx,
+                attempt,
+                shipped_failure,
+            )
+        if prev_audio is not None:
+            kept_cer = None
+            if guard is not None and gate is not None:
+                # the guard's CER of the attempt the gate kept (PrevAudioChain semantics unchanged)
+                kept_cer, _ = await guard.score([t - ctx.dc_base_id for t in semantic_only])
+            elif guard is not None:
+                kept_cer = guard.best_cer()
+                if kept_cer is None:  # no attempt passed serving's check: score the kept (last) one
+                    kept_cer, _ = await guard.score(semantic_codes_local)
+            prev_audio.add(semantic_only, kept_cer)
 
         n_sem = len(semantic_only)
         logger.debug(
@@ -1150,8 +1643,14 @@ class TTSEngine:
         vllm_priority: int = 100,
         silence_logit_bias: float | None = None,
         use_context: bool = True,
+        segment_system_tags: list[str] | None = None,
+        quality_gate=None,
     ) -> tuple[list[int], list[int]]:
         """Generate semantic tokens for one or more segments.
+
+        ``segment_system_tags`` (optional, one per segment) overrides ``system_tag``
+        for that segment's CB0 calls (per-segment slider headers).
+        ``quality_gate``: the /predict request's ``app.quality_gate.RequestGate``, or None (off).
 
         Returns (local_semantic_codes, marker_indices).
         """
@@ -1162,6 +1661,12 @@ class TTSEngine:
         audio_chunks: list[list[int]] = []
         prev_global: list[int] | None = None
         finished = False
+        # CB0_DROP_BAD_PREV_AUDIO: after a segment that failed the guard, the next
+        # one starts without previous audio and text.
+        chain = (
+            PrevAudioChain(self.config.cb0_ctc_chain_max_cer)
+            if self.config.cb0_drop_bad_prev_audio else None
+        )
 
         for seg_idx in range(n_segs):
             if finished:
@@ -1172,14 +1677,22 @@ class TTSEngine:
                 prev_chunk_global=prev_global if use_context else None,
                 sampling=sampling, voice_prompt=voice_prompt,
                 prefix=prefix, max_new_tokens=max_new_tokens,
-                forced_prefix=forced, system_tag=system_tag,
+                forced_prefix=forced,
+                system_tag=(
+                    segment_system_tags[seg_idx] if segment_system_tags else system_tag
+                ),
                 allow_marker_iteration=single,
                 priority=vllm_priority,
                 silence_logit_bias=silence_logit_bias,
                 use_context=use_context,
+                prev_audio=chain,
+                restart_context=(
+                    use_context and chain is not None and chain.drops_context(seg_idx)
+                ),
+                **({'quality_gate': quality_gate} if quality_gate is not None else {}),
             )
             audio_chunks.append(seg_global)
-            prev_global = seg_global
+            prev_global = chain.previous if chain is not None else seg_global
 
             if not single:
                 if hit_eos and seg_idx < n_segs - 1:
@@ -1470,6 +1983,17 @@ class TTSEngine:
         new_codes = _extract_acoustic_codes(output_ids, remaining_tokens, start_id, ctx.pad_id)
         return list(forced_prefix_codes) + new_codes if forced_prefix_codes else new_codes
 
+    def _stream_vv_adapter(self, n_codebooks: int):
+        """STREAM_VV_ADAPTER: the VibeVoice adapter for this stream's VibeVoice frames (the one /predict uses, loaded
+        from VV_ADAPTER_CKPT), or None (flag off, no adapter, or codes the adapter can't read)."""
+        if self.vv_adapter is None or not self.config.stream_vv_adapter:
+            return None
+        if n_codebooks - 1 != VV_ADAPTER_N_ACOUSTIC:
+            logger.warning("VibeVoice adapter skipped for this stream: needs %d-level codes (got %d)",
+                           VV_ADAPTER_N_ACOUSTIC + 1, n_codebooks)
+            return None
+        return self.vv_adapter
+
     async def generate_streaming(
         self,
         text: str | list[str],
@@ -1493,6 +2017,8 @@ class TTSEngine:
         language: str = DEFAULT_LANGUAGE,
         tag: str = DEFAULT_TAG,
         use_system_tag: bool = True,
+        controls: dict | str | None = None,
+        segment_controls: list | None = None,
     ):
         """Wrapper that guarantees VV slot cleanup even on cancellation/error."""
         if self.vv_tokenizer is None:
@@ -1500,6 +2026,11 @@ class TTSEngine:
                 "generate_streaming requires the VibeVoice acoustic tokenizer"
             )
         vv_slot = self.vv_engine.alloc_slot() if self.vv_engine else None
+        trim_lead = self.config.stream_lead_trim
+        # PREFIX_START_FADE: a response to a request with a prefix (non-empty prefix_text, as in
+        # _resolve_prefix) fades in over its first prefix_start_fade_ms, carried across chunks by the sample offset.
+        start_fade_ms = self.config.prefix_start_fade_ms if self.config.prefix_start_fade and prefix_text else None
+        emitted = 0
         try:
             async for chunk in self._generate_streaming_inner(
                 text=text, temperature=temperature, top_p=top_p, top_k=top_k,
@@ -1514,12 +2045,32 @@ class TTSEngine:
                 prompt_max_tokens=prompt_max_tokens,
                 text_preprocessor=text_preprocessor,
                 language=language, tag=tag, use_system_tag=use_system_tag,
+                controls=controls, segment_controls=segment_controls,
             ):
+                if trim_lead and chunk.shape[-1] > 0:
+                    # STREAM_LEAD_TRIM: /predict's leading edge trim on the first non-empty chunk only, before
+                    # the headroom gain (the threshold is at the decoder's level, as /predict's matched one).
+                    trim_lead = False
+                    lead_ms = self.config.stream_lead_trim_padding_ms
+                    if prefix_text and self.config.prefix_lead_trim_padding_ms is not None:
+                        lead_ms = self.config.prefix_lead_trim_padding_ms   # PREFIX_LEAD_TRIM_PADDING_MS (prefixed requests only)
+                    trimmed = trim_stream_lead(chunk, padding_ms=lead_ms)
+                    logger.debug("Stream lead trim: cut %d samples", chunk.shape[-1] - trimmed.shape[-1])
+                    chunk = trimmed
+                # OUTPUT_HEADROOM_DB: the same fixed gain per streamed chunk
+                # (early chunk, segment chunks and the DECODE_END_FIX flush), before the stream writers'
+                # int16 encode. A per-sample gain, so streaming-safe; 0 dB yields the chunk itself.
+                chunk = apply_output_headroom(chunk, self.config.output_headroom_db)
+                if start_fade_ms is not None:
+                    chunk = start_fade(chunk, start_fade_ms, DUALCODEC_SAMPLE_RATE, offset=emitted)
+                    emitted += chunk.shape[-1]
                 yield chunk
         finally:
             if vv_slot is not None:
                 self.vv_engine.free_slot(vv_slot)
                 logger.debug("Released VibeVoice streaming slot %s", vv_slot)
+            if not torch.cuda.is_available():
+                free_memory()  # return the stream's freed host buffers to the OS
 
     async def _generate_streaming_inner(
         self,
@@ -1545,6 +2096,8 @@ class TTSEngine:
         language: str = DEFAULT_LANGUAGE,
         tag: str = DEFAULT_TAG,
         use_system_tag: bool = True,
+        controls: dict | str | None = None,
+        segment_controls: list | None = None,
     ):
         """Async generator yielding audio Tensors as they become available.
 
@@ -1564,11 +2117,16 @@ class TTSEngine:
         segments = [text] if isinstance(text, str) else list(text)
         if text_preprocessor and segments:
             segments[0] = await text_preprocessor(segments[0])
+        cb0_system_tag, cb0_segment_tags = self._cb0_system_tags(
+            system_tag, len(segments), language, tag, use_system_tag,
+            controls=controls, segment_controls=segment_controls,
+        )
 
         prefix, prefix_acoustic_codes = await self._resolve_prefix(
             prefix_text, prefix_tokens, sampling, voice_prompt,
             max_new_tokens, acoustic_temperature, acoustic_top_k,
             system_tag=system_tag, silence_logit_bias=silence_logit_bias,
+            semantic_system_tag=cb0_system_tag,
         )
         # --- Early cb0 via _generate_semantic_segment ---
         effective_max_new_tokens = (
@@ -1585,49 +2143,55 @@ class TTSEngine:
                 f"max_new_tokens must be at least {early_dc_tokens} when "
                 f"streaming_initial_seconds={streaming_initial_seconds:g}"
             )
-        early_cb0: list[int] = []
-        if segments:
-            early_global, _ = await self._generate_semantic_segment(
-                seg_idx=0, segments=[segments[0]],
-                prev_chunk_global=None,
-                sampling=sampling, voice_prompt=voice_prompt,
-                prefix=prefix, max_new_tokens=early_dc_tokens,
-                priority=0, system_tag=system_tag,
-                early_mode=True,
-                boundary_total_segments=len(segments),
-                silence_logit_bias=silence_logit_bias,
-            )
-            ctx0 = self._cb_ctx(0)
-            early_cb0 = [t - ctx0.dc_base_id for t in early_global
-                         if ctx0.dc_base_id <= t < ctx0.dc_base_id + SEMANTIC_VOCAB_SIZE]
-            if self.config.force_first_silence and not early_cb0:
-                early_cb0 = [SILENCE_TOKEN_ID]
-            logger.debug("Generated %d early CB0 streaming tokens", len(early_cb0))
         # --- VV state and config ---
         chunk_s = self.config.streaming_chunk_seconds
         n_codebooks = self._n_codebooks()
         total_vv_emitted = 0
+        stream_adapter = self._stream_vv_adapter(n_codebooks)  # STREAM_VV_ADAPTER; None = the production frames
 
-        # --- Early acoustic + yield first audio ---
-        early_ac_per_cb: list[list[int]] = []
-        if early_cb0:
-            effective_early_dc = len(early_cb0) - pad
-            if effective_early_dc > 0:
+        async def early_cb0_attempt(attempt_sampling):
+            """The early chunk's CB0 codes (early mode)."""
+            early_global, _ = await self._generate_semantic_segment(
+                seg_idx=0, segments=[segments[0]],
+                prev_chunk_global=None,
+                sampling=attempt_sampling, voice_prompt=voice_prompt,
+                prefix=prefix, max_new_tokens=early_dc_tokens,
+                priority=0, system_tag=cb0_segment_tags[0],
+                early_mode=True,
+                boundary_total_segments=len(segments),
+                silence_logit_bias=silence_logit_bias,
+                stream_retry_fix=self.config.stream_retry_fix,
+            )
+            ctx0 = self._cb_ctx(0)
+            cb0 = [t - ctx0.dc_base_id for t in early_global
+                   if ctx0.dc_base_id <= t < ctx0.dc_base_id + SEMANTIC_VOCAB_SIZE]
+            if self.config.force_first_silence and not cb0:
+                cb0 = [SILENCE_TOKEN_ID]
+            logger.debug("Generated %d early CB0 streaming tokens", len(cb0))
+            return cb0
+
+        async def early_acoustic(cb0):
+            """CB1-3 and the DualCodec decode of the early chunk when it fills a quantum: (early_ac_per_cb, early_audio or None,
+            early_target_vv)."""
+            ac_per_cb: list[list[int]] = []
+            audio, target_vv = None, 0
+            effective_early_dc = len(cb0) - pad
+            if cb0 and effective_early_dc > 0:
                 dc_tokens_per_quantum = int(round(STREAMING_SECONDS_QUANTUM * dc_hz))
                 vv_frames_per_quantum = int(round(STREAMING_SECONDS_QUANTUM * VV_HZ))
                 available_quanta = effective_early_dc // dc_tokens_per_quantum
                 requested_quanta = round(
                     streaming_initial_seconds / STREAMING_SECONDS_QUANTUM
                 )
-                early_target_vv = (
+                target_vv = (
                     min(available_quanta, requested_quanta)
                     * vv_frames_per_quantum
                 )
-                if early_target_vv > 0:
+                if target_vv > 0:
                     # Build a temporary streaming state for the early chunk
                     early_state = self._build_streaming_state(prefix, prefix_acoustic_codes)
-                    early_state.cb0_segments.append(early_cb0)
-                    early_state.accumulated_sem.extend(early_cb0)
+                    early_state.cb0_segments.append(cb0)
+                    early_state.accumulated_sem.extend(cb0)
 
                     await self._generate_all_acoustic_for_segment(
                         early_state, seg_idx=0, n_real_segs=1,
@@ -1640,20 +2204,57 @@ class TTSEngine:
                     # Extract early acoustic codes for later use as forced prefixes
                     for cb_idx in range(n_codebooks - 1):
                         n_prefix_slots = 1 if prefix else 0
-                        early_ac_per_cb.append(early_state.ac_segs[cb_idx][n_prefix_slots])
+                        ac_per_cb.append(early_state.ac_segs[cb_idx][n_prefix_slots])
                     logger.debug(
                         "Early stream: %d DualCodec tokens -> %d VibeVoice frames",
-                        len(early_cb0),
-                        early_target_vv,
+                        len(cb0),
+                        target_vv,
                     )
                     with torch.no_grad():
-                        early_audio = codes_to_audio_tensor(self.dc_inference, early_cb0, early_ac_per_cb)
-                    early_frames = vv_encode(self.vv_tokenizer, early_audio)
-                    audio_chunk = await self.vv_engine.decode(
-                        early_frames[:, :early_target_vv], vv_slot,
-                    )
-                    total_vv_emitted = early_target_vv
-                    yield audio_chunk
+                        audio = codes_to_audio_tensor(self.dc_inference, cb0, ac_per_cb)
+            return ac_per_cb, audio, target_vv
+
+        early_cb0: list[int] = []
+        early_ac_per_cb: list[list[int]] = []
+        early_audio, early_target_vv = None, 0
+        if segments:
+            # STREAM_EARLY_CHECK: check the early chunk before it is played; re-sample a failed one from scratch, and if every
+            # attempt fails, start at segment 0 without an early chunk (never force a failed early prefix into segment 0).
+            n_early = max(1, self.config.stream_early_check_attempts) if self.config.stream_early_check else 1
+            for early_try in range(1, n_early + 1):
+                attempt_sampling = sampling if early_try == 1 else self._early_retry_sampling(sampling, early_try)
+                early_cb0 = await early_cb0_attempt(attempt_sampling)
+                reason = None
+                if self.config.stream_early_check:     # the codes first: a failed start skips CB1-3 and the decode
+                    reason = self._early_chunk_rejection(early_cb0, None, 0, len(segments[0]))
+                if reason is None:
+                    early_ac_per_cb, early_audio, early_target_vv = await early_acoustic(early_cb0)
+                    if not self.config.stream_early_check:
+                        break
+                    reason = self._early_chunk_rejection(early_cb0, early_audio, early_target_vv, len(segments[0]))
+                    if reason is None:
+                        break
+                logger.warning("Stream early chunk retry %d/%d: %s", early_try, n_early, reason)
+            else:
+                logger.warning(
+                    "Stream early chunk: all %d attempts failed; streaming starts at segment 0 without an early chunk",
+                    n_early,
+                )
+                early_cb0, early_ac_per_cb, early_audio, early_target_vv = [], [], None, 0
+
+        # --- Early VibeVoice decode + yield first audio ---
+        if early_audio is not None:
+            early_frames = vv_encode(self.vv_tokenizer, early_audio)
+            if stream_adapter is not None:
+                early_frames = correct_stream_frames(
+                    stream_adapter, self.dc_inference, early_cb0, early_ac_per_cb, early_audio, early_frames,
+                    0, early_target_vv,
+                )
+            audio_chunk = await self.vv_engine.decode(
+                early_frames[:, :early_target_vv], vv_slot,
+            )
+            total_vv_emitted = early_target_vv
+            yield audio_chunk
 
         # --- Main streaming loop: per-segment cb0->acoustic->VV ---
         state = self._build_streaming_state(prefix, prefix_acoustic_codes)
@@ -1669,6 +2270,10 @@ class TTSEngine:
 
         ctx0 = self._cb_ctx(0)
         prev_chunk_global: list[int] | None = None
+        chain = (
+            PrevAudioChain(self.config.cb0_ctc_chain_max_cer)
+            if self.config.cb0_drop_bad_prev_audio else None
+        )
         for seg_idx in range(n_real_segs):
             if text_preprocessor and seg_idx > 0:
                 segments[seg_idx] = await text_preprocessor(segments[seg_idx])
@@ -1680,15 +2285,18 @@ class TTSEngine:
                 sampling=sampling, voice_prompt=voice_prompt,
                 prefix=prefix, max_new_tokens=max_new_tokens,
                 forced_prefix=early_cb0 if seg_idx == 0 and early_cb0 else None,
-                priority=10, system_tag=system_tag,
+                priority=10, system_tag=cb0_segment_tags[seg_idx],
                 stop_at_eos=is_final,
                 silence_logit_bias=silence_logit_bias,
+                prev_audio=chain,
+                restart_context=chain is not None and chain.drops_context(seg_idx),
+                stream_retry_fix=self.config.stream_retry_fix,
             )
             local_cb0 = [t - ctx0.dc_base_id for t in seg_cb0_global
                          if ctx0.dc_base_id <= t < ctx0.dc_base_id + SEMANTIC_VOCAB_SIZE]
             state.cb0_segments.append(local_cb0)
             state.accumulated_sem.extend(local_cb0)
-            prev_chunk_global = seg_cb0_global
+            prev_chunk_global = chain.previous if chain is not None else seg_cb0_global
 
             early_forced = early_ac_per_cb if seg_idx == 0 and early_ac_per_cb else None
             await self._generate_all_acoustic_for_segment(
@@ -1703,7 +2311,7 @@ class TTSEngine:
 
             # VV incremental emit
             chunk, total_vv_emitted = await self._emit_vv_incremental(
-                state, total_vv_emitted, vv_slot, dc_hz, chunk_s,
+                state, total_vv_emitted, vv_slot, dc_hz, chunk_s, vv_adapter=stream_adapter,
             )
             if chunk is not None:
                 yield chunk
@@ -1721,9 +2329,18 @@ class TTSEngine:
             len(state.accumulated_sem),
             total_vv_emitted,
         )
+        emitted_before_flush = total_vv_emitted
         chunk, total_vv_emitted = await self._emit_vv_incremental(
-            state, total_vv_emitted, vv_slot, dc_hz, chunk_s, flush=True,
+            state, total_vv_emitted, vv_slot, dc_hz, chunk_s, flush=True, vv_adapter=stream_adapter,
         )
+        if chunk is not None and self.config.decode_end_fix:
+            # DECODE_END_FIX: the flush decodes every encoder frame, so it runs up to one
+            # VibeVoice frame past the codes; end the stream at the codes' length and fade it out.
+            chunk = finish_request_end(
+                chunk,
+                code_samples(len(state.accumulated_sem), dc_hz) - emitted_before_flush * VV_HOP_SAMPLES,
+                self.config.decode_end_fade_ms,
+            )
         if chunk is not None:
             yield chunk
 
@@ -1739,11 +2356,7 @@ class TTSEngine:
 
     def unload(self):
         for engine in self.engines:
-            shutdown = getattr(engine, "shutdown", None)
-            if shutdown is not None:
-                shutdown()
-            else:
-                engine.shutdown_background_loop()
+            shutdown_engine(engine)
         self.engines.clear()
         if self.dc_inference:
             del self.dc_inference
@@ -1752,6 +2365,7 @@ class TTSEngine:
             self.vv_engine = None
         if self.vv_tokenizer:
             del self.vv_tokenizer
+        self.vv_adapter = None
         free_memory()
 
 

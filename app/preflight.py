@@ -83,9 +83,36 @@ def validate_codebook_stack(codebook_paths: tuple[str, ...]) -> None:
         )
 
 
+def validate_lite_quant(config: ServerConfig) -> None:
+    """A lite plan must parse; a bundle directory must hold all codebook files."""
+    bundle = Path(config.lite_quant).expanduser()
+    if bundle.is_dir():
+        missing = [
+            str(bundle / f"cb{cb}.safetensors")
+            for cb in range(len(config.codebook_model_dirs))
+            if not (bundle / f"cb{cb}.safetensors").is_file()
+        ]
+        if missing:
+            raise ValueError(f"lite bundle {bundle} is missing {', '.join(missing)}")
+        return
+    from app.lite.plans import parse_codebook_plans, parse_spec
+
+    if config.lite_quant != "auto":  # "auto" resolves after the models are downloaded (app/lite)
+        parse_codebook_plans(config.lite_quant, len(config.codebook_model_dirs))
+    parse_spec(config.lite_vibevoice_quant)
+    if config.enable_verbalization:
+        parse_codebook_plans(config.lite_verbalizer_quant, 1)
+
+
 def main() -> None:
-    require_vllm_plugin()
     config = ServerConfig()
+    if config.backend == "lite":
+        try:
+            validate_lite_quant(config)
+        except ValueError as exc:
+            raise SystemExit(f"Model preflight failed: {exc}") from exc
+    else:
+        require_vllm_plugin()
     try:
         codebook_paths = resolve_codebook_model_paths(config.codebook_model_dirs)
         runtime_paths = resolve_runtime_model_paths(

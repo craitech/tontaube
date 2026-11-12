@@ -11,7 +11,7 @@ import re
 import shutil
 import tempfile
 
-from app.config import CODEBOOK_MODEL_DIRS
+from app.config import CODEBOOK_MODEL_DIRS, TTS_BACKEND
 from app.logging_utils import get_logger
 from app.vibevoice_assets import extract_acoustic_tokenizer
 
@@ -19,8 +19,10 @@ from app.vibevoice_assets import extract_acoustic_tokenizer
 logger = get_logger("model_sources")
 
 
-DEFAULT_MODEL_REPO_ID = "TontaubeAI/TontaubeV1"
-DEFAULT_MODEL_REVISION = "v1.0.0"
+# The lite backend downloads the standalone int4 release, vLLM the full-precision models.
+FULL_MODEL_REPO_ID = "TontaubeAI/TontaubeV1.1"
+DEFAULT_MODEL_REPO_ID = "TontaubeAI/TontaubeV1.1-int4" if TTS_BACKEND == "lite" else FULL_MODEL_REPO_ID
+DEFAULT_MODEL_REVISION = "v1.1.0"
 DEFAULT_VERBALIZER_REPO_ID = "TontaubeAI/TontaubeV1-Verbalizer"
 DEFAULT_VERBALIZER_REVISION = "v1.0.0"
 DEFAULT_DUALCODEC_REPO_ID = "amphion/dualcodec"
@@ -36,7 +38,10 @@ MODEL_REPOSITORY_FILES = (
     "COVERED_FILES.md",
     "THIRD_PARTY_NOTICES.md",
     "README.md",
+    "vibevoice_adapter.pt",
 )
+# The lite bundle, next to the codebook folders (absent from the full-precision repository).
+MODEL_REPOSITORY_DIRS = ("int4/**",)
 
 DUALCODEC_FILES = (
     "dualcodec_12hz_16384_4096.safetensors",
@@ -127,7 +132,8 @@ def resolve_codebook_model_paths(
                 repo_id,
                 revision,
                 MODEL_REPOSITORY_FILES
-                + tuple(f"{model_dir}/**" for model_dir in remote_dirs),
+                + tuple(f"{model_dir}/**" for model_dir in remote_dirs)
+                + MODEL_REPOSITORY_DIRS,
             )
         )
         resolved = [

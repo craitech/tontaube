@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>TontaubeV1 Studio</title>
+  <title>TontaubeV1.1 Studio</title>
   <link rel="stylesheet" href="/ui/assets/styles.css">
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <a class="brand" href="./" aria-label="TontaubeV1 Studio home">
+      <a class="brand" href="./" aria-label="TontaubeV1.1 Studio home">
         <img class="brand-logo" src="/ui/assets/tontaube-logo.png" alt="">
-        <span><strong>TontaubeV1</strong><small>Local speech studio</small></span>
+        <span><strong>TontaubeV1.1</strong><small>Local speech studio</small></span>
       </a>
       <div class="connection"><span id="connection-dot" class="status-dot"></span><span id="connection-label">Not checked</span></div>
     </header>
@@ -48,10 +48,10 @@
                 </select>
               </label>
               <label>Temperature
-                <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.8" required>
+                <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.7" required>
               </label>
             </div>
-            <p class="hint temperature-hint">0.6 favors correctness; values near 1.0 can sound more natural and expressive.</p>
+            <p class="hint temperature-hint">0.7 is the default; lower favors correctness, higher can sound more expressive.</p>
           </section>
 
           <aside class="card server-card" aria-labelledby="server-title">
@@ -101,13 +101,26 @@
           </section>
         </div>
 
+        <section class="card sliders-card" id="sliders-card" aria-labelledby="sliders-title">
+          <div class="section-heading compact">
+            <div><span class="step">Optional</span><h2 id="sliders-title">Style sliders</h2></div>
+            <div class="slider-summary">
+              <span id="slider-count" class="quiet"></span>
+              <button id="reset-sliders" class="secondary compact-button" type="button" aria-disabled="true">Reset all</button>
+            </div>
+          </div>
+          <p class="hint slider-intro">Speaking rate, pauses, pitch, and more, as the loaded model offers them. A slider you do not touch stays at "Model default" and is not sent, so the model chooses.</p>
+          <p id="slider-status" class="slider-status" role="status"></p>
+          <div id="slider-fields" class="slider-grid"></div>
+        </section>
+
         <details class="card advanced">
           <summary><span><strong>Advanced controls</strong><small>Sampling, context, and server-side options</small></span><span class="chevron">⌄</span></summary>
           <div class="advanced-body">
             <div class="field-grid four">
               <label>Top p <span class="optional">server default</span><input id="top-p" type="number" min="0.001" max="1" step="0.01" placeholder="0.95"></label>
               <label>Top k <span class="optional">server default</span><input id="top-k" type="number" min="-1" step="1" placeholder="50"></label>
-              <label>Frequency penalty<input id="frequency-penalty" type="number" min="-2" max="2" step="0.1" placeholder="0"></label>
+              <label>Frequency penalty <span class="optional">server default</span><input id="frequency-penalty" type="number" min="-2" max="2" step="0.1" placeholder="0.1"></label>
               <label>Silence bias<input id="silence-logit-bias" type="number" min="-10" max="10" step="0.1" placeholder="Server default"></label>
               <label>Acoustic temperature<input id="acoustic-temperature" type="number" min="0" max="2" step="0.05" placeholder="Server default"></label>
               <label>Acoustic top k<input id="acoustic-top-k" type="number" min="-1" step="1" placeholder="Server default"></label>
@@ -141,7 +154,7 @@
         <audio id="audio-player" controls preload="metadata"></audio><div id="result-meta" class="result-meta"></div>
       </section>
     </main>
-    <footer><span>TontaubeV1</span><a id="api-docs" href="http://127.0.0.1:8080/docs" target="_blank" rel="noreferrer">API documentation ↗</a></footer>
+    <footer><span>TontaubeV1.1</span><a id="api-docs" href="http://127.0.0.1:8080/docs" target="_blank" rel="noreferrer">API documentation ↗</a></footer>
   </div>
   <script src="/ui/assets/app.js" defer></script>
 </body>

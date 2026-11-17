@@ -4,6 +4,7 @@ import gc
 import hashlib
 import math
 import os
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -34,6 +35,7 @@ from app.config import (
     DEFAULT_STREAMING_INITIAL_SECONDS,
     DUALCODEC_HZ,
     DUALCODEC_MODEL_TYPE,
+    MAX_VOICE_PROMPT_TOKENS,
     STREAMING_SECONDS_QUANTUM,
     build_system_prompt,
 )
@@ -149,6 +151,8 @@ class TTSEngine:
         self.prompt_acoustic = None
         self._voice_prompt_cache: OrderedDict[str, tuple[list, list]] = OrderedDict()
         self._voice_prompt_cache_max = 128
+        # Generation encodes on the event loop, /encode_voice in a worker thread: one DualCodec encode at a time.
+        self._voice_prompt_lock = threading.Lock()
         self.verbalizer = None
         # Slider catalog of a control-enabled CB0 bundle (controls.json), else None.
         self.controls: ControlCatalog | None = None
@@ -900,10 +904,17 @@ class TTSEngine:
         vllm_priority: int | None = None,
         controls: dict | str | None = None,
         segment_controls: list | None = None,
+        return_piece_frames: bool = False,
     ):
         """``controls``: request-level sliders ({name: bin} or a control-token string);
         ``segment_controls``: one entry per text segment, merged over ``controls``
-        (see app/controls.py). Both only affect the CB0 header."""
+        (see app/controls.py). Both only affect the CB0 header.
+
+        Returns ``(audio, codebook_tokens)``; with ``return_piece_frames`` (/predict's include_timestamps)
+        ``(audio, codebook_tokens, piece_frames)``: ``piece_frames[i] = (start, end)``, the CB0 frames of text
+        segment i in ``codebook_tokens[0]``. The segments' codes are contiguous and decoded in one pass (no inserted
+        silence, no crossfade; a prefix is cut off at a frame boundary), so frame k starts at audio sample
+        k * 1920 (24 kHz). Segments after a CB0 early stop have no entry; the trailing silence tokens are in none."""
         start_time = time.time()
 
         sampling, voice_prompt, system_tag, acoustic_temperature, acoustic_top_k = self._resolve_params(
@@ -1006,6 +1017,9 @@ class TTSEngine:
                 semantic_codes = semantic_codes[prefix_len:]
                 acoustic_codes = [ac[prefix_len:] for ac in acoustic_codes]
                 marker_indices = [m - prefix_len for m in marker_indices[1:]]
+            # each generated segment's CB0 frames (before the trailing silence): starts [0] + markers
+            piece_bounds = [0] + list(marker_indices) + [len(semantic_codes)]
+            piece_frames = list(zip(piece_bounds[:-1], piece_bounds[1:]))
 
             self._append_trailing_silence(
                 semantic_codes, acoustic_codes, self.config.trailing_silence_tokens,
@@ -1047,6 +1061,7 @@ class TTSEngine:
                     gate_passes.append(self._gate_pass_record(
                         _rms_attempt, retry_reason, audio_tensor, semantic_codes, acoustic_codes, gate_request,
                     ))
+                    gate_passes[-1]['piece_frames'] = piece_frames
                 logger.warning(
                     "Generation quality retry %d/%d: %s",
                     _rms_attempt,
@@ -1059,8 +1074,8 @@ class TTSEngine:
             if gate_request is not None and gate_passes:
                 # quality gate: no pass passed the request-level check: keep the best pass, not the last one
                 best_pass = min(gate_passes, key=lambda r: r['rank'])
-                audio_tensor, semantic_codes, acoustic_codes = (
-                    best_pass['audio'], best_pass['semantic'], best_pass['acoustic'],
+                audio_tensor, semantic_codes, acoustic_codes, piece_frames = (
+                    best_pass['audio'], best_pass['semantic'], best_pass['acoustic'], best_pass['piece_frames'],
                 )
                 gate_kept_pass = best_pass['pass']
                 logger.warning(
@@ -1099,6 +1114,8 @@ class TTSEngine:
         )
 
         codebook_tokens = [semantic_codes] + acoustic_codes
+        if return_piece_frames:
+            return audio_tensor, codebook_tokens, piece_frames
         return audio_tensor, codebook_tokens
 
     def _early_retry_sampling(self, sampling: dict, attempt: int) -> dict:
@@ -1174,17 +1191,36 @@ class TTSEngine:
         voice_audio_b64: str | None,
         voice_path: str | None,
         prompt_max_tokens: int | None = None,
+        n_codebooks: int | None = None,
     ) -> tuple[list | None, list | None]:
-        return resolve_voice_prompt(
-            voice_audio_b64, voice_path,
-            self.dc_inference,
-            self.config.prompt_seconds,
-            prompt_max_tokens if prompt_max_tokens is not None else self.config.prompt_max_tokens,
-            self.config.generate_n_codebooks,
-            self._voice_prompt_cache,
-            self._voice_prompt_cache_max,
-            (self.prompt_semantic, self.prompt_acoustic),
+        with self._voice_prompt_lock:
+            return resolve_voice_prompt(
+                voice_audio_b64, voice_path,
+                self.dc_inference,
+                self.config.prompt_seconds,
+                prompt_max_tokens if prompt_max_tokens is not None else self.config.prompt_max_tokens,
+                n_codebooks or self.config.generate_n_codebooks,
+                self._voice_prompt_cache,
+                self._voice_prompt_cache_max,
+                (self.prompt_semantic, self.prompt_acoustic),
+            )
+
+    def encode_voice(
+        self, voice_audio_b64: str, prompt_max_tokens: int | None = None, n_codebooks: int | None = None,
+    ) -> list[list[int]]:
+        """Encode a reference into `n_codebooks` token rows (row 0 semantic, then acoustic).
+
+        prompt_max_tokens None returns the full prompt (the first prompt_seconds, at most
+        MAX_VOICE_PROMPT_TOKENS) instead of the server's default cap; n_codebooks None means the
+        codebooks generation uses. Shares the voice-prompt cache with generation (per codebook
+        count), so a later request with the same audio skips the encode. Blocking: call it off
+        the event loop.
+        """
+        semantic, acoustic = self._resolve_voice_prompt(
+            voice_audio_b64, None, prompt_max_tokens=prompt_max_tokens or MAX_VOICE_PROMPT_TOKENS,
+            n_codebooks=n_codebooks,
         )
+        return [semantic, *(acoustic or [])]
 
     def _check_cb0_generation(
         self, n_tokens: int, n_chars: int, hit_max_tokens: bool, hz: float,
@@ -2019,8 +2055,13 @@ class TTSEngine:
         use_system_tag: bool = True,
         controls: dict | str | None = None,
         segment_controls: list | None = None,
+        timings: list | None = None,
     ):
-        """Wrapper that guarantees VV slot cleanup even on cancellation/error."""
+        """Wrapper that guarantees VV slot cleanup even on cancellation/error.
+
+        ``timings``: a list that receives one ``(event, seconds since start, audio seconds generated so far)`` tuple per
+        step: ``"early"`` when the early chunk is ready, ``"segment"`` after each text segment, ``"end"`` after the
+        flush (app/stream_calibration.py). None = not recorded."""
         if self.vv_tokenizer is None:
             raise RuntimeError(
                 "generate_streaming requires the VibeVoice acoustic tokenizer"
@@ -2045,7 +2086,7 @@ class TTSEngine:
                 prompt_max_tokens=prompt_max_tokens,
                 text_preprocessor=text_preprocessor,
                 language=language, tag=tag, use_system_tag=use_system_tag,
-                controls=controls, segment_controls=segment_controls,
+                controls=controls, segment_controls=segment_controls, timings=timings,
             ):
                 if trim_lead and chunk.shape[-1] > 0:
                     # STREAM_LEAD_TRIM: /predict's leading edge trim on the first non-empty chunk only, before
@@ -2098,6 +2139,7 @@ class TTSEngine:
         use_system_tag: bool = True,
         controls: dict | str | None = None,
         segment_controls: list | None = None,
+        timings: list | None = None,
     ):
         """Async generator yielding audio Tensors as they become available.
 
@@ -2254,6 +2296,8 @@ class TTSEngine:
                 early_frames[:, :early_target_vv], vv_slot,
             )
             total_vv_emitted = early_target_vv
+            if timings is not None:
+                timings.append(("early", time.time() - start_time, early_target_vv / VV_HZ))
             yield audio_chunk
 
         # --- Main streaming loop: per-segment cb0->acoustic->VV ---
@@ -2313,6 +2357,8 @@ class TTSEngine:
             chunk, total_vv_emitted = await self._emit_vv_incremental(
                 state, total_vv_emitted, vv_slot, dc_hz, chunk_s, vv_adapter=stream_adapter,
             )
+            if timings is not None:
+                timings.append(("segment", time.time() - start_time, len(state.accumulated_sem) / dc_hz))
             if chunk is not None:
                 yield chunk
 
@@ -2341,6 +2387,8 @@ class TTSEngine:
                 code_samples(len(state.accumulated_sem), dc_hz) - emitted_before_flush * VV_HOP_SAMPLES,
                 self.config.decode_end_fade_ms,
             )
+        if timings is not None:
+            timings.append(("end", time.time() - start_time, len(state.accumulated_sem) / dc_hz))
         if chunk is not None:
             yield chunk
 

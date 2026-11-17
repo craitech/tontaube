@@ -74,8 +74,12 @@ def clip_long_pauses(
     *,
     cap_seconds: float = 2.5,
     headroom_db: float = 0.0,
+    cuts_out: list | None = None,
 ) -> tuple[np.ndarray, int, int]:
     """Return mono audio, removed sample count, and number of middle cuts.
+
+    cuts_out: a list that receives the (left, right, width) cuts applied (find_pause_cuts' tuples,
+    in input samples), for /predict's timestamp remapping (app/timestamps.py); None = not reported.
 
     Detection uses 20ms RMS frames below -55 dBFS (at the decoder's level;
     -55 - headroom_db dBFS for audio scaled by OUTPUT_HEADROOM_DB). Only runs
@@ -94,6 +98,8 @@ def clip_long_pauses(
         return source.copy(), 0, 0
 
     cuts = find_pause_cuts(source, sample_rate, cap_seconds=cap_seconds, headroom_db=headroom_db)
+    if cuts_out is not None:
+        cuts_out.extend(cuts)
     if not cuts:
         return source, 0, 0
     pieces = []

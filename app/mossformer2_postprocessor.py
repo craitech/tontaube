@@ -247,18 +247,22 @@ class MossFormer2Postprocessor:
         output /= np.maximum(weights, np.finfo(np.float64).eps)
         return output[:original_length].astype(np.float32)
 
-    def process(self, audio, input_sample_rate: int, *, headroom_db: float = 0.0) -> torch.Tensor:
+    def process(self, audio, input_sample_rate: int, *, headroom_db: float = 0.0,
+                cuts_out: list | None = None) -> torch.Tensor:
         # A single model instance is shared by request workers. Serializing this
         # bounded-memory stage avoids concurrent activation spikes on the GPU.
         # headroom_db: the OUTPUT_HEADROOM_DB already applied to `audio` (the
         # pause cap lowers its fixed thresholds by it).
+        # cuts_out: receives the pause cap's (left, right, width) cuts, in input
+        # samples at input_sample_rate (clip_long_pauses), before the resampling.
         with self._process_lock:
             if self._resident is None:
-                return self._process(audio, input_sample_rate, headroom_db=headroom_db)
+                return self._process(audio, input_sample_rate, headroom_db=headroom_db, cuts_out=cuts_out)
             with self._resident():
-                return self._process(audio, input_sample_rate, headroom_db=headroom_db)
+                return self._process(audio, input_sample_rate, headroom_db=headroom_db, cuts_out=cuts_out)
 
-    def _process(self, audio, input_sample_rate: int, *, headroom_db: float = 0.0) -> torch.Tensor:
+    def _process(self, audio, input_sample_rate: int, *, headroom_db: float = 0.0,
+                 cuts_out: list | None = None) -> torch.Tensor:
         source = (
             audio.detach()
             .float()
@@ -269,7 +273,10 @@ class MossFormer2Postprocessor:
         )
         # Match the tested order: cap on the original waveform, then resample
         # and enhance. Existing boundary trimming happens in /predict first.
-        source, removed, cuts = clip_long_pauses(source, input_sample_rate, headroom_db=headroom_db)
+        source, removed, cuts = clip_long_pauses(
+            source, input_sample_rate, headroom_db=headroom_db,
+            **({"cuts_out": cuts_out} if cuts_out is not None else {}),
+        )
         if cuts:
             logger.info("Pause cap: shortened %d quiet runs to 2.5s; removed %.3fs",
                         cuts, removed / input_sample_rate)

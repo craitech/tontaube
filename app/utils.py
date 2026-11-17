@@ -231,6 +231,8 @@ def encode_voice_prompt(
     audio = load_and_prep_audio(prompt_path)
     if prompt_seconds:
         audio = audio[..., :int(prompt_seconds * DUALCODEC_SAMPLE_RATE)]
+    if audio.shape[-1] < _SAMPLES_PER_TOKEN:
+        raise VoicePromptError("the voice reference contains no audio")
     audio = fit_reference_level(audio)
 
     max_samples_direct = 30 * DUALCODEC_SAMPLE_RATE  # 30s fits in one encode call
@@ -475,6 +477,7 @@ def resolve_voice_prompt(
         cache_key = "path:" + voice_path
     else:
         return truncate_voice_prompt(*default_prompt, prompt_max_tokens)
+    cache_key += f"|{n_codebooks}"  # /encode_voice can ask for more rows than generation uses
 
     cached = cache.get(cache_key)
     if cached is not None:

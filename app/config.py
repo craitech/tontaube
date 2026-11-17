@@ -106,7 +106,16 @@ DEFAULT_TAG = DEFAULT_TAG.strip().lower()
 build_system_prompt(DEFAULT_LANGUAGE, DEFAULT_TAG)
 
 
+# Release name of the model family; voice_tokens are tied to its DualCodec codebooks
+# (the same for the 4-bit and full-precision weights).
+MODEL_VERSION = "TontaubeV1.1"
+
 DUALCODEC_MODEL_TYPE = "12hz_v1"
+# The codec that made a token sequence, recorded with stored voice tokens.
+DUALCODEC_CODEC_ID = f"dualcodec_{DUALCODEC_MODEL_TYPE}"
+# 12hz_v1 has 1 semantic + 7 acoustic RVQ codebooks (dualcodec conf/model/dualcodec_12hz_16384_4096_8vq.yaml);
+# the Tontaube models use the first N_CODEBOOKS, /encode_voice can return all of them.
+DUALCODEC_MAX_CODEBOOKS = 8
 DUALCODEC_SAMPLE_RATE = 24000
 DUALCODEC_HZ = 12.5
 DUALCODEC_SEMANTIC_NORMALIZATION_FILE = "w2vbert2_mean_var_stats_emilia.pt"
@@ -118,6 +127,19 @@ MIN_STREAMING_INITIAL_SECONDS = STREAMING_SECONDS_QUANTUM
 MAX_STREAMING_INITIAL_SECONDS = 6.0
 DEFAULT_STREAMING_INITIAL_SECONDS = 2.8
 STREAMING_DC_PAD_TOKENS = 5
+# Streaming start buffer (app/stream_calibration.py). Off by default: requests without streaming_initial_seconds use
+# 2.8 s, and the first stream logs a warning that this can pause playback on slower machines
+# (STREAM_CALIBRATION_WARNING=0 hides it). STREAM_CALIBRATION=1 measures the machine with one short stream at startup;
+# a request without the field then gets the smallest start buffer that keeps its playback from pausing, at least
+# STREAM_AUTO_MIN_INITIAL_SECONDS (default 2.8 s, so a fast machine keeps its behaviour; lower it to let streams start
+# sooner where the machine allows), and an explicit value is logged as a warning next to the calibrated one.
+# STREAM_CALIBRATION_MARGIN scales the measured times.
+STREAM_CALIBRATION = os.getenv("STREAM_CALIBRATION", "0") == "1"
+STREAM_CALIBRATION_WARNING = os.getenv("STREAM_CALIBRATION_WARNING", "1") == "1"
+STREAM_AUTO_MIN_INITIAL_SECONDS = float(
+    os.getenv("STREAM_AUTO_MIN_INITIAL_SECONDS") or DEFAULT_STREAMING_INITIAL_SECONDS
+)
+STREAM_CALIBRATION_MARGIN = float(os.getenv("STREAM_CALIBRATION_MARGIN") or 1.25)
 
 # API-key authentication is opt-in for self-hosted deployments.
 REQUIRE_API_KEY = os.getenv("REQUIRE_API_KEY", "0") == "1"

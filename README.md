@@ -442,6 +442,24 @@ codebooks apply their own smaller caps. Reference audio should contain clean
 speech from one speaker; very quiet or very loud references are brought to a
 normal level before encoding.
 
+To encode a reference once and reuse it, send it to `POST /encode_voice` as
+`voice_audio_b64` (same formats and size limit; the first 60 seconds are
+encoded). The response's `voice_tokens` (row 0 semantic, then the acoustic
+rows) with the default codebook count can be passed unchanged to `/predict`,
+`/stream`, and `/ws/stream`; it also reports `n_tokens`, `n_codebooks`,
+`duration_seconds` (`n_tokens / 12.5`), `token_rate_hz`, `model_version`, and
+`codec` (`dualcodec_12hz_v1`).
+`prompt_max_tokens` (1--750) shortens the returned rows; omitted, the full
+encoding is returned. `n_codebooks` (1--8) selects how many DualCodec levels to
+return; omitted, the 4 the generation routes accept. The encoding also enters
+the server's voice-prompt cache, so a later request with the same
+`voice_audio_b64` skips the encode.
+
+```bash
+python3 -c 'import base64,json,sys; print(json.dumps({"voice_audio_b64": base64.b64encode(open(sys.argv[1],"rb").read()).decode()}))' voices/samples/Marcus.mp3 \
+| curl --silent http://127.0.0.1:8080/encode_voice -H 'content-type: application/json' --data-binary @-
+```
+
 The bundled catalogue includes 39 standard voices as MP3 references across all
 seven languages, plus seven legacy audio voices. Marcus is the default.
 Select a voice in the UI, or use `"voice_path": "samples/Marcus.mp3"` with
@@ -494,10 +512,39 @@ route; `vllm_priority` is limited to non-streaming `/predict` calls. An explicit
 `format` must match the transport (`mp3` for SSE, `opus` for WebSocket), or it
 may be omitted. `max_new_tokens` is the total per-chunk CB0 budget, including
 the initial silence token and any early streaming prefix, and accepts 50–400.
-`streaming_initial_seconds` controls the first buffered audio chunk. It defaults
-to 2.8 seconds and accepts 0.4–6.0 seconds in 0.4-second increments. Increasing
-it raises time to first audio but gives playback more headroom; if a custom
-`max_new_tokens` value is too small for it, the request is rejected explicitly.
+`streaming_initial_seconds` controls the first buffered audio chunk. It accepts
+0.4–6.0 seconds in 0.4-second increments. Increasing it raises time to first
+audio but gives playback more headroom; if a custom `max_new_tokens` value is
+too small for it, the request is rejected explicitly.
+
+Omitted, it is 2.8 seconds, which can let playback pause on slower machines;
+the first stream logs a warning about this. With `STREAM_CALIBRATION=1` the
+server measures the machine at startup (about 6 s on a GTX 1070 Ti, 20 s on a
+desktop CPU) and chooses the value per stream from the length of its first
+segments. Below about four times real time, long first segments still pause.
+
+### Word and character timestamps
+
+Set `include_timestamps: true` on an English `/predict` request to get the time
+of every spoken word and letter. Other languages are refused with status 422
+(`timestamps_unsupported_language`), as are servers without the CB0-CTC
+recogniser (`timestamps_unavailable`) and the streaming routes
+(`timestamps_not_streamable`). The response then carries:
+
+```json
+"timestamps": {
+  "text": "Hello, it's me.",
+  "words": [{"text": "Hello,", "start": 0.12, "end": 0.48, "char_start": 0, "char_end": 6, "confidence": 0.93}, ...],
+  "characters": [{"char": "H", "index": 0, "start": 0.12, "end": 0.18}, ...]
+}
+```
+
+`text` is what the model read (after verbalization and text cleaning), so it can
+differ from the request; `char_start`, `char_end` and `index` point into it.
+Times are seconds on the returned audio. A word that could not be aligned has
+`null` times and confidence 0. On test generations, word edges next to a pause
+were on average within 10 ms (starts) and 50 ms (ends) of the audible speech,
+at most 80 ms.
 
 ### Continuing from your own audio
 
@@ -545,6 +592,10 @@ The main runtime settings are environment variables:
 | `TTS_API_KEY` | Shared secret used when authentication is enabled |
 | `TTS_CORS_ORIGINS` | Comma-separated browser origins allowed to call the API; defaults to the local UI on port 3000 |
 | `ENABLE_STREAMING` | Enable SSE and WebSocket routes; defaults to `1` |
+| `STREAM_CALIBRATION` | Measure the machine at startup and choose `streaming_initial_seconds` per stream when a request omits it; defaults to `0` (2.8 seconds) |
+| `STREAM_CALIBRATION_WARNING` | Log a warning on the first stream while calibration is off; defaults to `1` |
+| `STREAM_AUTO_MIN_INITIAL_SECONDS` | Smallest start buffer the server chooses; defaults to `2.8`, lower values let short or fast streams start sooner |
+| `STREAM_CALIBRATION_MARGIN` | Factor on the measured generation times when choosing the start buffer; defaults to `1.25` |
 | `ENABLE_VIBEVOICE` | Load VibeVoice for output re-encoding and streaming; defaults to `1` |
 | `TTS_UI_HOST` | Bind address for the standalone UI-only server; defaults to `127.0.0.1` |
 | `TTS_UI_PORT` | Port for the standalone UI-only server; defaults to `3000` |

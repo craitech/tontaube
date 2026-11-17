@@ -125,7 +125,7 @@
               <label>Acoustic temperature<input id="acoustic-temperature" type="number" min="0" max="2" step="0.05" placeholder="Server default"></label>
               <label>Acoustic top k<input id="acoustic-top-k" type="number" min="-1" step="1" placeholder="Server default"></label>
               <label>Maximum new tokens<input id="max-new-tokens" type="number" min="50" max="400" step="1" placeholder="400"></label>
-              <label>Initial stream buffer <span class="optional">seconds</span><input id="streaming-initial-seconds" type="number" min="0.4" max="6" step="0.4" value="2.8"></label>
+              <label>Initial stream buffer <span class="optional">seconds</span><input id="streaming-initial-seconds" type="number" min="0.4" max="6" step="0.4" placeholder="Auto"></label>
               <label>Request priority<select id="priority"><option value="low">Low</option><option value="high">High</option></select></label>
               <label>vLLM priority <span class="optional">complete file only</span><input id="vllm-priority" type="number" step="1" placeholder="Unset"></label>
               <label>VibeVoice processing<select id="vibevoice-postprocess"><option value="">Server default</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label>

@@ -11,7 +11,7 @@ import re
 import shutil
 import tempfile
 
-from app.config import CODEBOOK_MODEL_DIRS, TTS_BACKEND
+from app.config import CODEBOOK_MODEL_DIRS, MODEL_VERSION, TTS_BACKEND
 from app.logging_utils import get_logger
 from app.vibevoice_assets import extract_acoustic_tokenizer
 
@@ -20,7 +20,7 @@ logger = get_logger("model_sources")
 
 
 # The lite backend downloads the standalone int4 release, vLLM the full-precision models.
-FULL_MODEL_REPO_ID = "TontaubeAI/TontaubeV1.1"
+FULL_MODEL_REPO_ID = f"TontaubeAI/{MODEL_VERSION}"
 DEFAULT_MODEL_REPO_ID = "TontaubeAI/TontaubeV1.1-int4" if TTS_BACKEND == "lite" else FULL_MODEL_REPO_ID
 DEFAULT_MODEL_REVISION = "v1.1.0"
 DEFAULT_VERBALIZER_REPO_ID = "TontaubeAI/TontaubeV1-Verbalizer"

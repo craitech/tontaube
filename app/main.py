@@ -27,7 +27,9 @@ from app.config import (
     DEFAULT_LANGUAGE,
     DEFAULT_TAG,
     DEFAULT_STREAMING_INITIAL_SECONDS,
+    DUALCODEC_CODEC_ID,
     DUALCODEC_HZ,
+    DUALCODEC_MAX_CODEBOOKS,
     DUALCODEC_SAMPLE_RATE,
     MAX_STREAMING_INITIAL_SECONDS,
     MAX_PREFIX_TOKENS_PER_ROW,
@@ -39,8 +41,16 @@ from app.config import (
     MAX_VOICE_REFERENCE_B64_CHARS,
     MERGE_SHORT_CLIENT_SEGMENTS,
     MERGE_SHORT_PIECES,
+    MODEL_VERSION,
+    N_CODEBOOKS,
     NO_SHORT_FINAL_SENTENCE,
     SEMANTIC_VOCAB_SIZE,
+    MAX_SEMANTIC_TOKENS_PER_CHUNK,
+    STREAM_AUTO_MIN_INITIAL_SECONDS,
+    STREAM_CALIBRATION,
+    STREAM_CALIBRATION_MARGIN,
+    STREAM_CALIBRATION_WARNING,
+    STREAMING_DC_PAD_TOKENS,
     MIN_STREAMING_INITIAL_SECONDS,
     STREAMING_DC_PAD_TOKENS,
     STREAMING_SECONDS_QUANTUM,
@@ -117,21 +127,37 @@ def _trim_boundary_silence(
     down by the same dB, so the trim points do not depend on the headroom.
     headroom_db=0 is the old threshold.
     """
+    bounds = _trim_bounds(
+        audio, padding_ms=padding_ms, silence_threshold_dbfs=silence_threshold_dbfs,
+        headroom_db=headroom_db, lead_padding_ms=lead_padding_ms,
+    )
+    return audio if bounds is None else audio[..., bounds[0]:bounds[1]]
+
+
+def _trim_bounds(
+    audio,
+    *,
+    padding_ms: int,
+    silence_threshold_dbfs: float = -50.0,
+    headroom_db: float = 0.0,
+    lead_padding_ms: int | None = None,
+) -> tuple[int, int] | None:
+    """_trim_boundary_silence's kept samples [start, end), or None (audio unchanged)."""
     if padding_ms < 0 or audio.shape[-1] == 0:
-        return audio
+        return None
 
     samples = audio.detach().float().reshape(-1, audio.shape[-1])
     mono_power = samples.square().mean(dim=0)
     frame_samples = max(1, round(DUALCODEC_SAMPLE_RATE * 0.02))
     hop_samples = max(1, round(DUALCODEC_SAMPLE_RATE * 0.01))
     if mono_power.numel() < frame_samples:
-        return audio
+        return None
 
     frame_rms = mono_power.unfold(0, frame_samples, hop_samples).mean(dim=-1).sqrt()
     threshold = 10.0 ** ((silence_threshold_dbfs - headroom_db) / 20.0)
     active_frames = (frame_rms >= threshold).nonzero(as_tuple=False).flatten()
     if active_frames.numel() == 0:
-        return audio
+        return None
 
     padding_samples = round(DUALCODEC_SAMPLE_RATE * padding_ms / 1000)
     # Retain the entire active frames, including at zero requested padding.
@@ -145,7 +171,7 @@ def _trim_boundary_silence(
     lead_samples = padding_samples if lead_padding_ms is None else round(DUALCODEC_SAMPLE_RATE * max(0, lead_padding_ms) / 1000)
     start = max(0, first_sample - lead_samples)
     end = min(audio.shape[-1], last_sample + padding_samples)
-    return audio[..., start:end]
+    return start, end
 
 
 def _encode_audio(
@@ -175,11 +201,14 @@ def _encode_audio(
     return encoded.getvalue(), mime_type
 
 
-def _apply_mossformer2_postprocessing(audio, input_sample_rate: int, *, headroom_db: float = 0.0):
+def _apply_mossformer2_postprocessing(
+    audio, input_sample_rate: int, *, headroom_db: float = 0.0, cuts_out: list | None = None,
+):
     """Load and run the optional enhancer outside the async event loop.
 
     headroom_db: the OUTPUT_HEADROOM_DB already applied to `audio`; the pause
-    cap lowers its fixed thresholds by it.
+    cap lowers its fixed thresholds by it. cuts_out: receives the pause cap's
+    applied (left, right, width) cuts in input samples (include_timestamps).
     """
     from app.mossformer2_postprocessor import (
         MOSSFORMER2_SAMPLE_RATE,
@@ -188,11 +217,14 @@ def _apply_mossformer2_postprocessing(audio, input_sample_rate: int, *, headroom
 
     enhanced = get_mossformer2_postprocessor().process(
         audio, input_sample_rate, headroom_db=headroom_db,
+        **({"cuts_out": cuts_out} if cuts_out is not None else {}),
     )
     return enhanced, MOSSFORMER2_SAMPLE_RATE
 
 
-class TTSRequest(BaseModel):
+class _InstancesRequest(BaseModel):
+    """Request body that also accepts the `{"instances": [request]}` envelope."""
+
     model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="before")
@@ -205,6 +237,8 @@ class TTSRequest(BaseModel):
             return instances[0]
         return value
 
+
+class TTSRequest(_InstancesRequest):
     text: str | list[str]
 
     @field_validator('text')
@@ -282,7 +316,9 @@ class TTSRequest(BaseModel):
         description=(
             "Initial audio buffered by streaming routes. Must be a multiple of "
             f"{STREAMING_SECONDS_QUANTUM} seconds. Larger values increase time "
-            "to first audio but provide more playback headroom."
+            "to first audio but provide more playback headroom. Omitted: 2.8 s, or, on a server "
+            "started with STREAM_CALIBRATION=1, chosen per request from its startup calibration so "
+            "playback does not pause on that machine (an explicit value is then logged as a warning)."
         ),
     )
     acoustic_temperature: float | None = Field(default=None, ge=0, le=2)
@@ -324,6 +360,14 @@ class TTSRequest(BaseModel):
             "for non-streaming requests unless the server sets "
             "MOSSFORMER2_POSTPROCESS_DEFAULT=0 (the default for the lite backend on CPU); "
             "set false to return the original 24 kHz output."
+        ),
+    )
+    include_timestamps: bool = Field(
+        default=False,
+        description=(
+            "Non-streaming /predict, English only: also return `timestamps`, the start and end (seconds "
+            "on the returned audio) of each spoken word and letter, from a forced alignment of the text "
+            "the model read against its CB0 codes."
         ),
     )
     format: Literal["wav", "mp3", "opus"] = "wav"
@@ -467,14 +511,89 @@ class TTSResponse(BaseModel):
     mime_type: str
     sample_rate: int
     codebook_tokens: list[list[int]] | None = None
+    timestamps: dict | None = Field(
+        default=None,
+        description=(
+            "Only with include_timestamps: {text, words: [{text, start, end, char_start, char_end, "
+            "confidence}], characters: [{char, index, start, end}]} (app/timestamps.py)."
+        ),
+    )
+
+
+class EncodeVoiceRequest(_InstancesRequest):
+    voice_audio_b64: str = Field(
+        min_length=1,
+        max_length=MAX_VOICE_REFERENCE_B64_CHARS,
+        validation_alias=AliasChoices("voice_audio_b64", "voice_opus_b64"),
+        description=(
+            "Base64-encoded voice-reference audio in any FFmpeg-supported format; "
+            "only its first 60 seconds are encoded."
+        ),
+    )
+    prompt_max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_VOICE_PROMPT_TOKENS,
+        description="Maximum token count to return; omitted returns the full encoded prompt.",
+    )
+    n_codebooks: int | None = Field(
+        default=None,
+        ge=1,
+        le=DUALCODEC_MAX_CODEBOOKS,
+        description=(
+            f"Codebook rows to return, up to all {DUALCODEC_MAX_CODEBOOKS} DualCodec levels (for "
+            f"decoding back to audio); omitted = the {N_CODEBOOKS} the model uses. Generation "
+            f"routes accept at most the first {N_CODEBOOKS} rows."
+        ),
+    )
+
+
+class EncodeVoiceResponse(BaseModel):
+    voice_tokens: list[list[int]] = Field(
+        description=(
+            "Row 0 semantic, rows 1.. acoustic; its first four rows are the `voice_tokens` "
+            "of /predict, /stream and /ws/stream."
+        ),
+    )
+    n_tokens: int
+    n_codebooks: int
+    duration_seconds: float
+    token_rate_hz: float
+    model_version: str
+    codec: str
 
 
 class TTSErrorResponse(BaseModel):
     error: str
+    code: str | None = Field(
+        default=None,
+        description="Stable machine-readable reason, where one is defined (e.g. timestamps_unavailable).",
+    )
 
 
 class TTSRequestOptionError(ValueError):
-    """A valid request whose selected feature is unavailable."""
+    """A valid request whose selected feature is unavailable. ``code``: optional stable reason for clients."""
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+class _CodedMessage(str):
+    """An error message (compares as the plain string) with a stable machine-readable ``code``."""
+
+    code: str | None = None
+
+    def __new__(cls, message: str, code: str):
+        obj = super().__new__(cls, message)
+        obj.code = code
+        return obj
+
+
+def _error_body(message: str, code: str | None = None) -> dict:
+    """{"error": message} plus "code" when the message carries one."""
+    code = code or getattr(message, "code", None)
+    return TTSErrorResponse(error=str(message), code=code).model_dump(exclude_none=True)
 
 
 def _require_verbalizer(req: TTSRequest, engine) -> None:
@@ -489,6 +608,17 @@ def _require_verbalizer(req: TTSRequest, engine) -> None:
             "use_verbalization=true requires a loaded verbalizer; start the "
             "server with ENABLE_VERBALIZATION=1"
         )
+
+
+def _require_timestamps(req: TTSRequest, engine) -> None:
+    if not req.include_timestamps:
+        return
+    if req.language != "english":
+        raise TTSRequestOptionError(
+            "include_timestamps is only available for English", code="timestamps_unsupported_language",
+        )
+    if engine is None or getattr(engine, "cb0_ctc", None) is None:
+        raise TTSRequestOptionError("timestamps are not available on this server", code="timestamps_unavailable")
 
 
 def _scaled_chars(limit: int, scale: float) -> int:
@@ -584,6 +714,10 @@ def _streaming_option_error(req: TTSRequest, transport: Literal["mp3", "opus"]) 
         and "mossformer2_postprocess" in req.model_fields_set
     ):
         return "mossformer2_postprocess is supported only by non-streaming /predict"
+    if req.include_timestamps:
+        return _CodedMessage(
+            "include_timestamps is supported only by non-streaming /predict", "timestamps_not_streamable",
+        )
     if "format" in req.model_fields_set and req.format != transport:
         return f"this streaming route outputs {transport}; set format={transport!r} or omit format"
     if req.vllm_priority is not None:
@@ -629,6 +763,7 @@ async def _synthesize(req: TTSRequest) -> dict:
     engine = await _get_engine()
     _require_verbalizer(req, engine)
     _require_vibevoice(req, engine)
+    _require_timestamps(req, engine)
     raw = _prepare_raw_text(req.text)
     segment_controls = req.segment_controls
     if req.use_verbalization:
@@ -655,7 +790,7 @@ async def _synthesize(req: TTSRequest) -> dict:
     )
     _require_controls(req, engine, text, segment_controls)
 
-    audio, codebook_tokens = await engine.generate(
+    generated = await engine.generate(
         text=text,
         temperature=req.temperature,
         top_p=req.top_p,
@@ -679,7 +814,20 @@ async def _synthesize(req: TTSRequest) -> dict:
         vllm_priority=req.vllm_priority,
         controls=req.controls,
         segment_controls=segment_controls,
+        **({"return_piece_frames": True} if req.include_timestamps else {}),
     )
+    audio, codebook_tokens = generated[0], generated[1]
+    alignments = timeline = None
+    if req.include_timestamps:
+        # include_timestamps: align each piece on its own CB0 codes now; the times are on the decoded audio and
+        # `timeline` carries them through the edge trim and the pause cap below (app/timestamps.py).
+        from app import timestamps as ts
+
+        pieces = [text] if isinstance(text, str) else list(text)
+        alignments = await asyncio.to_thread(
+            ts.align_pieces_safe, engine.cb0_ctc, codebook_tokens[0], generated[2], pieces,
+        )
+        timeline = ts.Timeline()
 
     output_sample_rate = DUALCODEC_SAMPLE_RATE
     # engine.generate scaled the audio by
@@ -688,26 +836,41 @@ async def _synthesize(req: TTSRequest) -> dict:
     # and the headroom is a pure level change (0 dB: the old thresholds).
     headroom_db = engine.config.output_headroom_db
     if req.trim_silence_padding_ms is not None:
-        audio = _trim_boundary_silence(
+        bounds = _trim_bounds(
             audio,
             padding_ms=req.trim_silence_padding_ms,
             headroom_db=headroom_db,
             # PREFIX_LEAD_TRIM_PADDING_MS: a shorter LEADING edge for a continuation (prefixed request); the tail keeps the request's
             lead_padding_ms=engine.config.prefix_lead_trim_padding_ms if req.prefix_text else None,
         )
+        if bounds is not None:
+            audio = audio[..., bounds[0]:bounds[1]]
+            if timeline is not None:
+                timeline.trim(bounds[0], bounds[1], output_sample_rate)
     if req.mossformer2_postprocess:
+        pause_cuts = [] if timeline is not None else None
+        cap_rate = output_sample_rate
         audio, output_sample_rate = await asyncio.to_thread(
             _apply_mossformer2_postprocessing,
             audio,
             output_sample_rate,
             headroom_db=headroom_db,
+            **({"cuts_out": pause_cuts} if pause_cuts is not None else {}),
         )
+        if timeline is not None:
+            timeline.cut(pause_cuts, cap_rate)  # the cuts the cap applied, in samples at its input rate
     if req.prefix_text and engine.config.prefix_start_fade:
         # PREFIX_START_FADE: the client splices this continuation after its own audio; fade the
         # response's first prefix_start_fade_ms in, on the final audio (after trim / pause cap / MossFormer2).
         from app.dualcodec_utils import start_fade
 
         audio = start_fade(audio, engine.config.prefix_start_fade_ms, output_sample_rate)
+    timestamps = None
+    if timeline is not None:
+        from app import timestamps as ts
+
+        timeline.finish(audio.shape[-1] / output_sample_rate)
+        timestamps = ts.assemble(alignments, timeline)
     audio_bytes, mime_type = _encode_audio(
         audio,
         req.format,
@@ -719,6 +882,7 @@ async def _synthesize(req: TTSRequest) -> dict:
         mime_type=mime_type,
         sample_rate=output_sample_rate,
         codebook_tokens=codebook_tokens,
+        timestamps=timestamps,
     ).model_dump()
 
 
@@ -737,16 +901,95 @@ def create_app():
     _engine_ready = _asyncio.Event()
     _server_config = ServerConfig()
     _request_slots = _asyncio.BoundedSemaphore(_server_config.max_inflight_requests)
+    _stream_calibration: dict = {"value": None, "warned": False}   # StreamCalibration once measured (lifespan)
+
+    async def _calibrate_streaming(engine):
+        """Stream CALIBRATION_TEXT once through the normal streaming path; None (fixed default buffer) on failure."""
+        from app.stream_calibration import CALIBRATION_INITIAL_SECONDS, CALIBRATION_TEXT, StreamCalibration
+
+        started = time.perf_counter()
+        try:
+            req = TTSRequest(
+                text=list(CALIBRATION_TEXT),
+                use_verbalization=getattr(engine, "verbalizer", None) is not None,
+                streaming_initial_seconds=CALIBRATION_INITIAL_SECONDS,
+            )
+            text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
+            timings: list = []
+            async for _chunk in engine.generate_streaming(
+                text=text, timings=timings, **_streaming_kwargs(req, preprocessor, segment_controls),
+            ):
+                pass
+            calibration = StreamCalibration.from_timings(
+                timings, [len(piece) for piece in CALIBRATION_TEXT], time.perf_counter() - started,
+            )
+        except ValueError as exc:
+            logger.warning("Stream calibration failed (%s); streams without streaming_initial_seconds use %.1f s",
+                           exc, DEFAULT_STREAMING_INITIAL_SECONDS)
+            return None
+        except Exception:
+            logger.exception("Stream calibration failed; streams without streaming_initial_seconds use %.1f s",
+                             DEFAULT_STREAMING_INITIAL_SECONDS)
+            return None
+        logger.info("Stream calibration: %s", calibration.summary(STREAM_AUTO_MIN_INITIAL_SECONDS,
+                                                                  STREAM_CALIBRATION_MARGIN))
+        if calibration.rate < 1.0:
+            logger.warning(
+                "Stream calibration: this machine generates slower than real time (%.2fx); long streams will "
+                "pause between chunks whatever the start buffer. Use /predict for long texts.", calibration.rate,
+            )
+        return calibration
+
+    def _initial_seconds(req: TTSRequest, engine, text) -> float:
+        """streaming_initial_seconds for this stream: the request's own value (with a warning), else the
+        calibrated choice for its segments (app/stream_calibration.py), else the fixed default."""
+        from app.stream_calibration import quantize_down
+
+        calibration = _stream_calibration["value"]
+        pieces = [text] if isinstance(text, str) else list(text)
+        config = getattr(engine, "config", None)
+        max_tokens = req.max_new_tokens or getattr(config, "max_new_tokens", MAX_SEMANTIC_TOKENS_PER_CHUNK)
+        by_tokens = quantize_down((max_tokens - STREAMING_DC_PAD_TOKENS) / DUALCODEC_HZ)
+        ceiling = min(MAX_STREAMING_INITIAL_SECONDS, max(MIN_STREAMING_INITIAL_SECONDS, by_tokens))
+        chars = [len(piece) for piece in pieces]
+        explicit = "streaming_initial_seconds" in req.model_fields_set
+        if calibration is None:
+            if not STREAM_CALIBRATION and STREAM_CALIBRATION_WARNING and not _stream_calibration["warned"]:
+                _stream_calibration["warned"] = True
+                logger.warning(
+                    "Stream calibration is off: streams without streaming_initial_seconds start with %.1f s of audio, "
+                    "which can pause playback on slower machines. STREAM_CALIBRATION=1 measures this machine at "
+                    "startup; STREAM_CALIBRATION_WARNING=0 hides this message.", DEFAULT_STREAMING_INITIAL_SECONDS,
+                )
+            return req.streaming_initial_seconds if explicit else min(DEFAULT_STREAMING_INITIAL_SECONDS, ceiling)
+        if explicit:
+            needed, pauses = calibration.plan(chars, floor=MIN_STREAMING_INITIAL_SECONDS, ceiling=ceiling,
+                                              margin=STREAM_CALIBRATION_MARGIN)
+            note = ("; playback may pause on this machine" if req.streaming_initial_seconds < needed or pauses
+                    else "; the first audio comes later than needed" if req.streaming_initial_seconds > needed else "")
+            logger.warning(
+                "streaming_initial_seconds=%.1f set explicitly; the calibrated start buffer for this request "
+                "is %.1f s%s", req.streaming_initial_seconds, needed, note,
+            )
+            return req.streaming_initial_seconds
+        initial, pauses = calibration.plan(chars, floor=STREAM_AUTO_MIN_INITIAL_SECONDS, ceiling=ceiling,
+                                           margin=STREAM_CALIBRATION_MARGIN)
+        log = logger.warning if pauses else logger.info
+        log("Stream start buffer %.1f s for %d segment(s), first %d characters%s", initial, len(chars), chars[0],
+            "; playback is expected to pause even so" if pauses else "")
+        return initial
 
     @asynccontextmanager
     async def lifespan(_app):
         if REQUIRE_API_KEY and not TTS_API_KEY:
             raise RuntimeError("TTS_API_KEY is required when REQUIRE_API_KEY=1")
-        await _get_engine()
+        engine = await _get_engine()
         logger.info(
             "End-to-end request concurrency limited to %d",
             _server_config.max_inflight_requests,
         )
+        if _enable_streaming and STREAM_CALIBRATION and getattr(engine, "vv_tokenizer", None) is not None:
+            _stream_calibration["value"] = await _calibrate_streaming(engine)
         _engine_ready.set()
         try:
             yield
@@ -758,14 +1001,14 @@ def create_app():
     @app.exception_handler(TTSRequestOptionError)
     async def request_option_error(_request: Request, exc: TTSRequestOptionError):
         return JSONResponse(
-            content=TTSErrorResponse(error=str(exc)).model_dump(),
+            content=_error_body(str(exc), getattr(exc, "code", None)),
             status_code=422,
         )
 
     @app.exception_handler(VoicePromptError)
     async def voice_prompt_error(_request: Request, exc: VoicePromptError):
         return JSONResponse(
-            content=TTSErrorResponse(error=str(exc)).model_dump(),
+            content=_error_body(str(exc)),
             status_code=422,
         )
 
@@ -813,7 +1056,7 @@ def create_app():
                 provided_key = request.headers.get("x-api-key")
                 if not provided_key or not secrets.compare_digest(provided_key, TTS_API_KEY):
                     return JSONResponse(
-                        content=TTSErrorResponse(error="unauthorized").model_dump(),
+                        content=_error_body("unauthorized"),
                         status_code=status.HTTP_401_UNAUTHORIZED,
                     )
         return await call_next(request)
@@ -854,7 +1097,9 @@ def create_app():
         _require_controls(req, engine, text, segment_controls)
         return text, preprocessor, segment_controls
 
-    def _streaming_kwargs(req: TTSRequest, preprocessor, segment_controls=None) -> dict:
+    def _streaming_kwargs(req: TTSRequest, preprocessor, segment_controls=None, initial_seconds=None) -> dict:
+        if initial_seconds is None:
+            initial_seconds = req.streaming_initial_seconds
         return {
             "controls": req.controls,
             "segment_controls": segment_controls,
@@ -870,7 +1115,7 @@ def create_app():
             "prefix_text": req.prefix_text or None,
             "prefix_tokens": req.prefix_tokens,
             "max_new_tokens": req.max_new_tokens,
-            "streaming_initial_seconds": req.streaming_initial_seconds,
+            "streaming_initial_seconds": initial_seconds,
             "acoustic_temperature": req.acoustic_temperature,
             "acoustic_top_k": req.acoustic_top_k,
             "prompt_max_tokens": req.prompt_max_tokens,
@@ -891,6 +1136,35 @@ def create_app():
         async with _request_slots:
             result = await synthesize(req)
         return JSONResponse(content=result)
+
+    @app.post(
+        "/encode_voice",
+        response_model=EncodeVoiceResponse,
+        description="Encode a voice reference once into `voice_tokens` for later requests.",
+    )
+    async def encode_voice(req: EncodeVoiceRequest):
+        if not _engine_ready.is_set():
+            return JSONResponse(content={"error": "Model still loading"}, status_code=503)
+        async with _request_slots:
+            engine = await _get_engine()
+            started = time.perf_counter()
+            rows = await _asyncio.to_thread(
+                engine.encode_voice, req.voice_audio_b64, req.prompt_max_tokens, req.n_codebooks,
+            )
+        n_tokens = len(rows[0])
+        logger.info(
+            "Encoded voice: %d tokens x %d codebooks in %.2fs",
+            n_tokens, len(rows), time.perf_counter() - started,
+        )
+        return EncodeVoiceResponse(
+            voice_tokens=rows,
+            n_tokens=n_tokens,
+            n_codebooks=len(rows),
+            duration_seconds=n_tokens / DUALCODEC_HZ,
+            token_rate_hz=DUALCODEC_HZ,
+            model_version=MODEL_VERSION,
+            codec=DUALCODEC_CODEC_ID,
+        )
 
     # --- Streaming routes ---
     if _enable_streaming:
@@ -954,7 +1228,7 @@ def create_app():
             """Build an MP3 SSE response, honoring bitrate and request priority."""
             option_error = _streaming_option_error(req, "mp3")
             if option_error:
-                return JSONResponse(content={"error": option_error}, status_code=422)
+                return JSONResponse(content=_error_body(option_error), status_code=422)
             engine = await _get_engine()
             if engine.vv_tokenizer is None:
                 return JSONResponse(
@@ -962,6 +1236,7 @@ def create_app():
                     status_code=503,
                 )
             text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
+            initial_seconds = _initial_seconds(req, engine, text)
             writer = Mp3StreamWriter(
                 DUALCODEC_SAMPLE_RATE,
                 bitrate=_bitrate_number(req.bitrate, bits_per_second=False),
@@ -971,7 +1246,7 @@ def create_app():
                 _audio_sse_generator(
                     engine, text, writer,
                     priority_high=req.priority == "high",
-                    **_streaming_kwargs(req, preprocessor, segment_controls),
+                    **_streaming_kwargs(req, preprocessor, segment_controls, initial_seconds),
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -1009,7 +1284,7 @@ def create_app():
                 req = TTSRequest.model_validate(payload)
                 option_error = _streaming_option_error(req, "opus")
                 if option_error:
-                    await ws.send_json({"error": option_error})
+                    await ws.send_json(_error_body(option_error))
                     await ws.close(code=1008)
                     return
                 engine = await _get_engine()
@@ -1020,6 +1295,7 @@ def create_app():
                     await ws.close(code=1013)
                     return
                 text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
+                initial_seconds = _initial_seconds(req, engine, text)
                 opus_enc = _OpusStreamEncoder(
                     DUALCODEC_SAMPLE_RATE,
                     bitrate=_bitrate_number(req.bitrate, bits_per_second=True),
@@ -1031,7 +1307,7 @@ def create_app():
                     try:
                         async for audio_chunk in engine.generate_streaming(
                             text=text,
-                            **_streaming_kwargs(req, preprocessor, segment_controls),
+                            **_streaming_kwargs(req, preprocessor, segment_controls, initial_seconds),
                         ):
                             await ws.send_bytes(opus_enc.encode(audio_chunk))
                         await ws.send_json({"done": True})

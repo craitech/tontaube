@@ -36,7 +36,7 @@ def test_cache_stores_full_encoding_and_applies_each_request_cap(tmp_path, monke
     assert first == (full_semantic[:5], [codes[:5] for codes in full_acoustic])
     assert second == (full_semantic[:12], [codes[:12] for codes in full_acoustic])
     assert third == (full_semantic[:3], [codes[:3] for codes in full_acoustic])
-    assert cache["path:" + str(voice_path)] == (full_semantic, full_acoustic)
+    assert cache["path:" + str(voice_path) + "|4"] == (full_semantic, full_acoustic)
 
 
 def test_default_prompt_is_capped_per_request():

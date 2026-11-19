@@ -767,18 +767,23 @@ async def _synthesize(req: TTSRequest) -> dict:
     raw = _prepare_raw_text(req.text)
     segment_controls = req.segment_controls
     if req.use_verbalization:
-        raw, segment_controls = _split_with_controls(
-            raw, segment_controls, digit_weight=4,
-            chunk_scales=_chunk_scales(req, engine, raw, segment_controls),
-        )
         context = _continuation_context(req, engine)   # only the first segment continues the prefix
-        if isinstance(raw, list):
-            raw = [
-                await _verbalize_segment(engine, segment, context if index == 0 else None)
-                for index, segment in enumerate(raw)
-            ]
+        if isinstance(raw, str) and context is None:
+            # One text without a prefix: the verbalizer reads it whole and cuts it at paragraphs itself,
+            # so tables, headings and lists keep their context. The spoken text is split below.
+            raw, segment_controls = await engine.verbalizer.verbalize(raw), None
         else:
-            raw = await _verbalize_segment(engine, raw, context)
+            raw, segment_controls = _split_with_controls(
+                raw, segment_controls, digit_weight=4,
+                chunk_scales=_chunk_scales(req, engine, raw, segment_controls),
+            )
+            if isinstance(raw, list):
+                raw = [
+                    await _verbalize_segment(engine, segment, context if index == 0 else None)
+                    for index, segment in enumerate(raw)
+                ]
+            else:
+                raw = await _verbalize_segment(engine, raw, context)
     text = (
         [sanitize_text_for_tts(segment) for segment in raw]
         if isinstance(raw, list)

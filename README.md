@@ -27,7 +27,7 @@ an x86-64 CPU, [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
 FFmpeg, and the Opus runtime. Clone the release and start the server:
 
 ```bash
-git clone --branch v1.1.0 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.1.1 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run --python 3.12 --frozen tontaube serve
 ```
@@ -67,9 +67,27 @@ python3 -c 'import base64,json,sys; print(json.dumps({"text":"This voice was clo
 
 English text verbalization is optional and disabled by default. To load it,
 start the server with `ENABLE_VERBALIZATION=1`; requests that should use it must
-also send `"use_verbalization": true`. The verbalizer uses about 1.9 GiB of
+also send `"use_verbalization": true`. The verbalizer uses about 2.5 GiB of
 additional GPU memory, so leave it disabled when written and spoken forms are
 already identical.
+
+The verbalizer also runs on its own, without the speech models, for use with
+any text-to-speech system:
+
+```bash
+uv run tontaube verbalize report.txt      # prints the spoken text
+uv run tontaube verbalize --serve         # API on 127.0.0.1:8081
+
+curl -s http://127.0.0.1:8081/v1/verbalize \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "It costs $5."}'
+# {"text":"It costs five dollars."}
+```
+
+`text` may also be a list of strings. Long texts are cut at paragraphs
+internally, and texts that arrive together share model passes. On an RTX 3090
+a sentence takes from a few milliseconds to about a tenth of a second, depending
+on how much has to be rewritten, and a 20,000-character report about 2 seconds.
 
 ### Browser interface
 
@@ -116,7 +134,7 @@ in about 4 GiB of GPU memory and peaks at about 6.5 GiB. The
 [vLLM backend](#vllm-backend) needs at least 24 GiB.
 
 The application pins the Tontaube weights and upstream model revisions for
-release `v1.1.0`. For a later release, use its matching source tag; do not mix
+release `v1.1.1`. For a later release, use its matching source tag; do not mix
 model bundles and inference code from different releases. While the Tontaube
 repositories are private or gated, provide a read-only `HF_TOKEN`.
 
@@ -215,13 +233,13 @@ encapsulated in an image. Install Docker Engine and the NVIDIA Container
 Toolkit, then build and run:
 
 ```bash
-docker build -t tontaube:1.1.0 .
+docker build -t tontaube:1.1.1 .
 
 docker run --rm --gpus all --ipc=host \
   -p 127.0.0.1:8080:8080 \
   -v tontaube-hf-cache:/root/.cache/huggingface \
   -v tontaube-cache:/root/.cache/tontaube \
-  tontaube:1.1.0
+  tontaube:1.1.1
 ```
 
 The named volumes preserve downloaded models and the prepared VibeVoice
@@ -605,8 +623,10 @@ The main runtime settings are environment variables:
 | `TTS_LOG_LEVEL` | Runtime log level; defaults to `INFO`, use `DEBUG` for token and decoding diagnostics |
 | `ENABLE_VERBALIZATION` | Load the optional English verbalizer; defaults to `0` |
 | `VERBALIZATION_MODEL_REPO_ID` | HF verbalizer repository; defaults to `TontaubeAI/TontaubeV1-Verbalizer` |
-| `VERBALIZATION_MODEL_REVISION` | HF verbalizer revision; defaults to `v1.0.0` |
+| `VERBALIZATION_MODEL_REVISION` | HF verbalizer revision; defaults to `v1.1.0` |
 | `VERBALIZATION_MODEL_PATH` | Optional local verbalizer-directory override |
+| `VERBALIZER_DRAFT` | `0` decodes the verbalizer one token at a time instead of verifying drafted blocks; defaults to `1` |
+| `VERBALIZER_HOST`, `VERBALIZER_PORT` | Bind address and port of `tontaube verbalize --serve`; default to `127.0.0.1` and `8081` |
 | `TTS_CAPACITY_PROFILE` | `minimal`, `low-vram` (default with lite), `balanced` (default with vLLM), or `high-throughput` |
 | `MAX_NUM_SEQS_PER_CB` | Four comma-separated active-sequence limits |
 | `MAX_INFLIGHT_REQUESTS` | End-to-end request limit; defaults to twice the CB0 active-sequence limit |
@@ -620,7 +640,7 @@ docker run --rm --gpus all --ipc=host \
   -e MODEL_PATH=/srv/models \
   -e REQUIRE_API_KEY=1 \
   -e TTS_API_KEY="replace-with-a-secret" \
-  tontaube:1.1.0
+  tontaube:1.1.1
 ```
 
 To enable the verbalizer, set `ENABLE_VERBALIZATION=1`. It must resolve and load
@@ -635,7 +655,7 @@ The default backend runs all four codebook models in the API process with
 weight-only 4-bit layers, CUDA graphs, and a paged KV cache. It loads in about
 4 GiB of GPU memory and peaks at about 6.5 GiB (long texts, encoding a voice
 reference for cloning, MossFormer2 enhancement); the optional verbalizer adds
-1.9 GiB. It serves the same API as the vLLM backend.
+about 2.5 GiB. It serves the same API as the vLLM backend.
 
 | Variable | Purpose |
 |---|---|

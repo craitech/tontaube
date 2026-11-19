@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tontaube-inference"
-version = "1.1.0"
+version = "1.1.1"
 description = "Inference server for Tontaube text-to-speech"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -47,6 +47,7 @@ app = [
     "ui/*.png",
     "third_party/clearvoice_mossformer2_sr/LICENSE",
     "cb0_rate_window_factors.json",
+    "verbalizer_draft_tables.json",
     "lite/quantize/calibration_texts.json",
     "native/*.cpp",
     "native/*.h",

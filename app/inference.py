@@ -677,6 +677,8 @@ class TTSEngine:
                 gpu_util=self.config.verbalization_gpu_util,
                 max_num_seqs=self.config.verbalization_max_num_seqs,
                 growth_guard=self.config.verbalizer_growth_guard,
+                draft=self.config.verbalizer_draft,
+                guard=self.config.verbalizer_guard,
                 backend=self.config.backend,
                 lite_quant=self.config.lite_verbalizer_quant,
             )

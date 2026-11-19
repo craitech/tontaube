@@ -378,6 +378,7 @@ class LiteCausalLM(LiteCodebookModel):
         del emb, head
         self.fc1 = self.fc2 = None
         self.layers, self.norm = load_layers(w, cfg, plan, dev, dt)
+        torch.cuda.empty_cache()
 
     def linears(self):
         out = {f"layers.{i}.{n}": getattr(L, n) for i, L in enumerate(self.layers)

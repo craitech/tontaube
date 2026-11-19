@@ -206,6 +206,8 @@ def _verbalizer_returning(model_text):
     v._generate = Verbalizer._generate.__get__(v, Verbalizer)   # _verbalize_plain's model call
     v._extract_tagged = Verbalizer._extract_tagged
     v.growth_guard = True
+    v.guard = True
+    v.block = None
     v.tokenizer = MagicMock()
     v.tokenizer.encode.return_value = [1]
     v.tokenizer.return_value = {"input_ids": [2]}

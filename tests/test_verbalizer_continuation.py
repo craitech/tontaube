@@ -152,6 +152,7 @@ def _verbalizer(readings, growth_guard=True):
 
     v = Verbalizer.__new__(Verbalizer)
     v.growth_guard = growth_guard
+    v.guard = True
     v._generate = AsyncMock(side_effect=lambda text: readings.get(text, text.strip()))
     return v
 

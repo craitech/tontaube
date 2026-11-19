@@ -713,6 +713,14 @@ class ServerConfig:
     # Loaded once and applied only to English requests whose use_verbalization
     # flag is true.
     enable_verbalization: bool = os.getenv("ENABLE_VERBALIZATION", "0") == "1"
+    # VERBALIZER_GUARD=1 turns on the pre-pass and word checks (app/verbalizer_guard.py) that were built for the
+    # first verbalizer model; the current model drops citation markers, link parameters and markup on purpose,
+    # which those checks would reject. Off, each output only has to be closed, of plausible length, and copy its
+    # marked numbers from the input.
+    verbalizer_guard: bool = field(default_factory=lambda: _env_flag("VERBALIZER_GUARD", False))
+    # VERBALIZER_DRAFT=0: decode one token at a time with the lite engine instead of draft and verify.
+    verbalizer_draft: bool = field(default_factory=lambda: _env_flag("VERBALIZER_DRAFT", True))
+    # With VERBALIZER_GUARD=1 only.
     # Verbalizer growth guard: on top of the misread guard (app/verbalizer_guard.py check_output), reject a
     # verbalizer output that adds words the input does not explain (numbers, symbols and abbreviations may expand;
     # plain words may not grow) or runs far longer than the input (e.g. it returns its own system instructions) ->

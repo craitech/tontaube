@@ -10,7 +10,7 @@ from app import cli
 def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     cli.main([])
     output = capsys.readouterr().out
-    assert "{serve,ui,preflight,quantize}" in output
+    assert "{serve,ui,verbalize,preflight,quantize}" in output
 
 
 def test_serve_routes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -37,6 +37,20 @@ def test_ui_routes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     cli.main(["ui", "--host", "0.0.0.0", "--port", "4000"])
 
     assert calls == [("0.0.0.0", 4000)]
+
+
+def test_verbalize_routes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import torch_variant, verbalizer_server
+
+    calls = []
+    monkeypatch.setattr(torch_variant, "check_torch_variant", lambda argv: None)
+    monkeypatch.setattr(verbalizer_server, "serve", lambda host, port: calls.append(("serve", host, port)))
+    monkeypatch.setattr(verbalizer_server, "verbalize_file", lambda path: calls.append(("file", path)))
+
+    cli.main(["verbalize", "report.txt"])
+    cli.main(["verbalize", "--serve", "--port", "9000"])
+
+    assert calls == [("file", "report.txt"), ("serve", None, 9000)]
 
 
 def test_preflight_routes_command(monkeypatch: pytest.MonkeyPatch) -> None:

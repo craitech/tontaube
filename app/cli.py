@@ -43,6 +43,15 @@ def _parser() -> argparse.ArgumentParser:
         help="HTTP port (default: TTS_UI_PORT or 3000)",
     )
 
+    verbalize = commands.add_parser(
+        "verbalize",
+        help="turn written English into spoken text with the verbalizer alone (a file, standard input, or an API)",
+    )
+    verbalize.add_argument("file", nargs="?", help="text file to read (default: standard input)")
+    verbalize.add_argument("--serve", action="store_true", help="start the verbalizer API (POST /v1/verbalize)")
+    verbalize.add_argument("--host", default=None, help="bind address (default: VERBALIZER_HOST or 127.0.0.1)")
+    verbalize.add_argument("--port", default=None, type=int, help="HTTP port (default: VERBALIZER_PORT or 8081)")
+
     commands.add_parser(
         "preflight",
         help="download, prepare, and validate enabled models without starting the API",
@@ -89,6 +98,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         from app.main import main as serve_main
 
         serve_main(host=args.host, port=args.port)
+        return
+    if args.command == "verbalize":
+        from app.torch_variant import check_torch_variant
+
+        check_torch_variant(argv)
+
+        from app import verbalizer_server
+
+        if args.serve:
+            verbalizer_server.serve(args.host, args.port)
+        else:
+            verbalizer_server.verbalize_file(args.file)
         return
     if args.command == "ui":
         from app.ui_server import serve

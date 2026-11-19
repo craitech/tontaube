@@ -29,7 +29,8 @@ if TTS_BACKEND == "vllm":
 else:
     from app.lite import SamplingParams, TokensPrompt
 
-__all__ = ["SamplingParams", "TokensPrompt", "build_codebook_engines", "build_verbalizer_engine", "shutdown_engine"]
+__all__ = ["SamplingParams", "TokensPrompt", "build_codebook_engines", "build_verbalizer_block_lm",
+           "build_verbalizer_engine", "shutdown_engine"]
 
 
 async def build_codebook_engines(config, model_paths: list[str], tokenizers: list) -> list:
@@ -77,6 +78,18 @@ def build_verbalizer_engine(backend: str, model_path: str, max_len: int, max_num
 
     engine = build_vllm(model_path, max_len, max_num_seqs, gpu_util)
     return engine, VllmSamplingParams(temperature=0, max_tokens=1024), VllmTokensPrompt
+
+
+def build_verbalizer_block_lm(model_path: str, lite_quant: str, max_len: int, lanes: int, prefix_ids: list[int]):
+    """The lite backend's block verifier for the verbalizer LM (draft-and-verify decoding)."""
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("the verbalizer needs a CUDA GPU; start without ENABLE_VERBALIZATION=1 on a machine "
+                           "without one")
+    from app.lite.gpu.block import BlockLM
+
+    return BlockLM(model_path, lite_quant, max_len, lanes, prefix_ids)
 
 
 def shutdown_engine(engine) -> None:

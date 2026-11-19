@@ -90,7 +90,7 @@ def test_verbalizer_defaults_to_separate_hf_repo(monkeypatch, tmp_path):
         tmp_path / "verbalizer-snapshot"
     )
     assert calls == [
-        ("TontaubeAI/TontaubeV1-Verbalizer", "v1.0.0", ("*",))
+        ("TontaubeAI/TontaubeV1-Verbalizer", "v1.1.0", ("*",))
     ]
 
 

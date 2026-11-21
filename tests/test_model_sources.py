@@ -53,7 +53,7 @@ def test_codebooks_default_to_hf_subfolders(monkeypatch, tmp_path):
     assert calls == [
         (
             model_sources.DEFAULT_MODEL_REPO_ID,
-            "v1.1.0",
+            "v1.1.1",
             model_sources.MODEL_REPOSITORY_FILES
             + ("cb0/**", "cb1/**", "cb2/**", "cb3/**")
             + ("int4/**",),

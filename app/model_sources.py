@@ -22,7 +22,7 @@ logger = get_logger("model_sources")
 # The lite backend downloads the standalone int4 release, vLLM the full-precision models.
 FULL_MODEL_REPO_ID = f"TontaubeAI/{MODEL_VERSION}"
 DEFAULT_MODEL_REPO_ID = "TontaubeAI/TontaubeV1.1-int4" if TTS_BACKEND == "lite" else FULL_MODEL_REPO_ID
-DEFAULT_MODEL_REVISION = "v1.1.0"
+DEFAULT_MODEL_REVISION = "v1.1.1"
 DEFAULT_VERBALIZER_REPO_ID = "TontaubeAI/TontaubeV1-Verbalizer"
 DEFAULT_VERBALIZER_REVISION = "v1.1.0"
 DEFAULT_DUALCODEC_REPO_ID = "amphion/dualcodec"
@@ -38,6 +38,7 @@ MODEL_REPOSITORY_FILES = (
     "COVERED_FILES.md",
     "THIRD_PARTY_NOTICES.md",
     "README.md",
+    "config.json",   # repository metadata; the Hub counts downloads by this file
     "vibevoice_adapter.pt",
 )
 # The lite bundle, next to the codebook folders (absent from the full-precision repository).

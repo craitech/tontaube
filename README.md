@@ -591,7 +591,7 @@ The main runtime settings are environment variables:
 | `TTS_BACKEND` | `lite` (default: the 4-bit model, GPU or CPU) or `vllm` (full precision) |
 | `TONTAUBE_TORCH_VARIANT` | PyTorch build check at start: `auto` (default), `default` (skip the check), or `cu126` (CUDA 12.6 build for older GPUs) |
 | `TTS_MODEL_REPO_ID` | HF repository containing `cb0/` through `cb3/`; defaults to `TontaubeAI/TontaubeV1.1-int4` (`TontaubeAI/TontaubeV1.1` with vLLM) |
-| `TTS_MODEL_REVISION` | HF model revision; defaults to `v1.1.0` |
+| `TTS_MODEL_REVISION` | HF model revision; defaults to `v1.1.1` |
 | `CB0_MODEL_PATH` ... `CB3_MODEL_PATH` | Optional per-codebook local-directory overrides |
 | `MODEL_PATH` | Optional local root containing `cb0/` through `cb3/` |
 | `DUALCODEC_MODEL_PATH` | Optional local DualCodec snapshot override |

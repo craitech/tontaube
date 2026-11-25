@@ -21,7 +21,11 @@ logger = get_logger("inference")
 
 if TTS_BACKEND == "vllm":
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    from vllm import SamplingParams, TokensPrompt
+    try:
+        from vllm import SamplingParams, TokensPrompt
+    except ImportError as exc:
+        raise ImportError("TTS_BACKEND=vllm needs vLLM, an optional extra: install it with `uv sync --extra vllm` "
+                          "(or run with `uv run --extra vllm ...`)") from exc
 
     from app.model.vllm_plugin import register as _register_vllm_model
 

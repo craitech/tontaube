@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib.metadata import entry_points
 from pathlib import Path
 
-from app.config import DUALCODEC_SEMANTIC_NORMALIZATION_FILE, ServerConfig
+from app.config import DUALCODEC_SEMANTIC_NORMALIZATION_FILE, TTS_MODEL, ServerConfig
 from app.model_sources import (
     RuntimeModelPaths,
     read_codebook_metadata,
@@ -104,7 +104,20 @@ def validate_lite_quant(config: ServerConfig) -> None:
         parse_codebook_plans(config.lite_verbalizer_quant, 1)
 
 
+def flash_main() -> None:
+    from app.flash import preflight
+
+    try:
+        summary = preflight()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"Model preflight failed: {exc}") from exc
+    print(f"Model preflight passed: {summary}", flush=True)
+
+
 def main() -> None:
+    if TTS_MODEL == "flash":
+        flash_main()
+        return
     config = ServerConfig()
     if config.backend == "lite":
         try:

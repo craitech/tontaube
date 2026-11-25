@@ -309,6 +309,7 @@ class _FakeConfig:
 
 class _FakeEngine:
     vv_tokenizer = object()
+    can_stream = True
 
     def __init__(self, verbalize_prefix_context=True):
         self.verbalizer = _FakeVerbalizer()

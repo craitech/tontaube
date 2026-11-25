@@ -27,6 +27,10 @@ VOICE_MANIFEST_FILENAME = "manifest.json"
 VOICE_FILES_DIRECTORY = "samples"
 
 
+class VoicePromptError(ValueError):
+    """The supplied voice reference cannot be used."""
+
+
 def _voice_manifest(directory: Path) -> dict[str, dict[str, str]]:
     path = directory / VOICE_MANIFEST_FILENAME
     if not path.is_file():

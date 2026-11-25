@@ -1,0 +1,143 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Read aloud</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fff; --fg: #1c1c1f; --muted: #6b6c74; --soft: #f2f3f6; --line: #dfe0e6;
+    --acc: #2457c5; --acc-hi: #1c48a6; --on-acc: #fff;
+    --warn-bg: #fff4de; --warn-fg: #6e4600; --err-bg: #fdeaea; --err-fg: #9a1c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1f2023; --fg: #ececf0; --muted: #a1a2ab; --soft: #2b2c31; --line: #3b3c43;
+      --acc: #7ea4ff; --acc-hi: #9ab8ff; --on-acc: #0f1420;
+      --warn-bg: #3a2f17; --warn-fg: #f2d08c; --err-bg: #40211f; --err-fg: #f5aaa6;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 340px; padding: 14px 16px; background: var(--bg); color: var(--fg);
+         font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+  header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  header img { width: 20px; height: 20px; }
+  h1 { flex: 1; margin: 0; font-size: 14px; font-weight: 600; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--soft); color: var(--muted); }
+  .pill.live { background: color-mix(in srgb, var(--acc) 16%, transparent); color: var(--acc); }
+  .pill.bad { background: var(--err-bg); color: var(--err-fg); }
+  .actions { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+  button { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+           color: var(--fg); cursor: pointer; white-space: nowrap; }
+  button:hover { background: var(--soft); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+  button.main { background: var(--acc); border-color: var(--acc); color: var(--on-acc); font-weight: 600; }
+  button.main:hover { background: var(--acc-hi); border-color: var(--acc-hi); }
+  #stop { display: flex; align-items: center; gap: 6px; }
+  #stop::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: currentColor; }
+  .msg { margin-top: 10px; padding: 7px 10px; border-radius: 8px; background: var(--soft); white-space: pre-wrap; }
+  .msg.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .msg.err { background: var(--err-bg); color: var(--err-fg); }
+  section { margin-top: 12px; }
+  .line { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); margin-bottom: 6px; }
+  .line b { color: var(--fg); font-weight: 600; }
+  .num { font-variant-numeric: tabular-nums; }
+  progress { appearance: none; display: block; width: 100%; height: 6px; border: 0; border-radius: 3px; overflow: hidden; background: var(--soft); }
+  progress::-webkit-progress-bar { background: var(--soft); }
+  progress::-webkit-progress-value { background: var(--acc); border-radius: 3px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .stat { padding: 6px 8px; border-radius: 8px; background: var(--soft); min-width: 0; }
+  .stat b { display: block; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat span { font-size: 11px; color: var(--muted); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 6px 0 0; font-size: 12px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .settings { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 8px; }
+  .opt { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; }
+  .opt small { color: var(--muted); }
+  input[type=checkbox] { appearance: none; position: relative; flex: none; width: 30px; height: 18px; margin: 0; border-radius: 9px;
+                         background: var(--line); cursor: pointer; transition: background .15s; }
+  input[type=checkbox]::before { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+                                 background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s; }
+  input[type=checkbox]:checked { background: var(--acc); }
+  input[type=checkbox]:checked::before { transform: translateX(12px); }
+  select { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
+  input[type=number] { width: 64px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+                       color: var(--fg); font: inherit; text-align: right; }
+  .hint { margin-top: 10px; font-size: 11px; color: var(--muted); }
+  .opt.row { position: relative; justify-content: flex-start; cursor: default; }
+  .opt.row label { cursor: pointer; }
+  .opt.row input { margin-left: auto; }
+  .info { position: relative; flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-left: -3px; padding: 0;
+          border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted);
+          font: italic 600 10px/1 Georgia, "Times New Roman", serif; }
+  .info::after { content: ""; position: absolute; inset: -6px; }
+  .info:hover, .info[aria-expanded="true"] { background: transparent; border-color: var(--acc); color: var(--acc); }
+  .tip { position: absolute; z-index: 10; left: 0; right: 0; bottom: calc(100% + 6px); padding: 8px 10px;
+         border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg);
+         box-shadow: 0 6px 20px rgba(0, 0, 0, .18); font-size: 12px; line-height: 1.45;
+         visibility: hidden; opacity: 0; transition: opacity .12s, visibility .12s; pointer-events: none; }
+  .info:focus-visible + .tip, .info[aria-expanded="true"] + .tip { visibility: visible; opacity: 1; }
+  @media (hover: hover) { .info:hover + .tip { visibility: visible; opacity: 1; } }
+  .info[data-dismissed] + .tip { visibility: hidden; opacity: 0; }
+  .note { font-size: 11.5px; color: var(--muted); }
+  .gpustat { margin-top: -2px; font-size: 12px; color: var(--muted); }
+  .gpustat .use { display: flex; align-items: center; gap: 6px; color: var(--fg); }
+  .gpustat .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+  .gpustat.on .dot { background: var(--acc); }
+  .gpustat .why { position: relative; margin-top: 3px; padding-left: 13px; }
+  .guide { margin: 6px 0 0 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--fg); }
+  .guide summary { display: flex; align-items: center; gap: 7px; padding: 5px 9px; color: var(--acc); font-weight: 600; cursor: pointer;
+                   list-style: none; user-select: none; }
+  .guide summary::-webkit-details-marker { display: none; }
+  .guide summary::before { content: ""; flex: none; width: 6px; height: 6px; border-right: 1.5px solid currentColor;
+                           border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+  .guide[open] summary::before { transform: rotate(45deg); }
+  .guide ol { margin: 0; padding: 0 10px 9px 28px; line-height: 1.45; }
+  .guide li + li { margin-top: 4px; }
+  .guide code { padding: 0 4px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere; user-select: all;
+                font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .info[hidden] { display: none; }
+</style>
+<header>
+  <img src="icons/icon32.png" alt="">
+  <h1>Read aloud</h1>
+  <span id="state" class="pill">…</span>
+</header>
+<div class="actions">
+  <button id="page" class="main">Read page</button>
+  <button id="sel">Read selection</button>
+  <button id="stop">Stop</button>
+</div>
+<div id="msg" class="msg" hidden></div>
+<section id="load" hidden>
+  <div class="line"><span id="loadWhat">Starting the engine…</span><b id="loadNum" class="num"></b></div>
+  <progress id="prog"></progress>
+</section>
+<section id="status" hidden>
+  <div class="line"><span id="what"></span><b id="where" class="num"></b></div>
+  <div id="figures" hidden>
+    <div class="stats">
+      <div class="stat"><b id="first">–</b><span>first audio</span></div>
+      <div class="stat"><b id="speed">–</b><span>speed vs real time</span></div>
+      <div class="stat"><b id="gaps">–</b><span>gaps</span></div>
+    </div>
+    <div id="unknown" class="msg warn" hidden></div>
+    <details><summary>Details</summary><dl id="details"></dl></details>
+  </div>
+</section>
+<section class="settings">
+  <label class="opt"><span>Highlight what is read</span><input id="hl" type="checkbox"></label>
+  <div class="opt row"><label for="bwe">48 kHz</label><button type="button" class="info" aria-label="About 48 kHz" aria-describedby="tip-bwe" aria-expanded="false">i</button><span id="tip-bwe" class="tip" role="tooltip">Plays at 48 kHz instead of 24 kHz. An upsampler adds the high frequencies, so the voice sounds brighter and clearer. It takes extra computing time, so on first use it is switched on only if this device is fast enough. You can change it at any time.</span><small id="bweUse"></small><input id="bwe" type="checkbox"></div>
+  <div class="opt row"><label for="redraw">Redraw pitch jumps</label><button type="button" class="info" aria-label="About redrawing pitch jumps" aria-describedby="tip-redraw" aria-expanded="false">i</button><span id="tip-redraw" class="tip" role="tooltip">A small detector listens while the speech is made. Where the pitch suddenly jumps to another note, that moment is made again before it plays. On slow devices there is not always time for it.</span><input id="redraw" type="checkbox"></div>
+  <label class="opt"><span>Start delay</span><span><input id="delay" type="number" min="0" step="50"> ms</span></label>
+  <label class="opt"><span>GPU</span><select id="gpu"><option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option></select></label>
+  <div id="gpuStatus" class="gpustat" hidden>
+    <div class="use"><span class="dot" aria-hidden="true"></span><span id="gpuUse"></span></div>
+    <div id="gpuWhy" class="why" hidden><span id="gpuWhyText"></span></div>
+    <details id="gpuGuide" class="guide" hidden><summary>How to get the graphics card working</summary><ol id="gpuSteps"></ol></details>
+  </div>
+  <div id="setNote" class="note" aria-live="polite" hidden></div>
+</section>
+<div id="hint" class="hint"></div>
+<script type="module" src="popup.js"></script>

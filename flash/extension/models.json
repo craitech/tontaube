@@ -1,0 +1,30 @@
+{
+ "version": "058c9464ccaa",
+ "files": [
+  {
+   "name": "lm.bin",
+   "size": 249514180,
+   "sha256": "5651426010ba71500201b2084fe2d3ed9954c09710cf37f2cb7046c4cd885653"
+  },
+  {
+   "name": "misc.bin",
+   "size": 57404224,
+   "sha256": "d73cc5a91d286fbcdd50a8ac5f80c8527da6664ed3c39a598171c62bd000c236"
+  },
+  {
+   "name": "vv.bin",
+   "size": 364337348,
+   "sha256": "e24d8742adb53b324c1e57eb83228eb9be70f800dd6f5320827058aadde0a9d4"
+  },
+  {
+   "name": "detector.bin",
+   "size": 164612,
+   "sha256": "a49e83ddc1abf0cf1612c2dfa93d5a386a931bd16bd6fbf0dacc4eb82b46ad20"
+  },
+  {
+   "name": "bwe.bin",
+   "size": 32042468,
+   "sha256": "595638a6809273d483beaf237c09e88a410945a2b1924c69648e42dff0c1428f"
+  }
+ ]
+}

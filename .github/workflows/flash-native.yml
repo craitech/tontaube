@@ -1,0 +1,181 @@
+# TontaubeV1.1 Flash's native libraries (CPU engine, text front end) for a release, built with the flags of
+# flash/common/build.py: Linux x86-64 and aarch64 (manylinux_2_28: glibc 2.28 or newer, C++ runtime linked in),
+# Windows x86-64 (LLVM MinGW, runtime linked in) and macOS on Apple silicon (Xcode clang, macOS 11 or newer). Each is
+# checked (kernel tests, text front end, one sentence spoken from an empty cache) and attached to the GitHub release
+# of the tag with SHA256SUMS and build provenance; flash/common/build.py downloads them for checkouts of that version.
+name: Flash native libraries
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag to build and attach the libraries to, e.g. v1.2.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  LLVM_MINGW: "20261117"
+  LLVM_MINGW_SHA256: 4d002e330a0f703625aa5ccbc37e96f8f824413e163bfc7336774aabd2c3a412
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, kernel_test: "g++ -O2 -std=c++17 -I app/native -I flash/engine tests/native/kern_float_test.cpp -o kt" }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, kernel_test: "g++ -O2 -std=c++17 -fopenmp -I app/native tests/native/lin_q_neon_test.cpp -o kt" }
+    runs-on: ${{ matrix.runner }}
+    container: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
+    env:
+      PY: /opt/python/cp312-cp312/bin/python
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Kernel tests
+        run: ${{ matrix.kernel_test }} && ./kt
+      - name: Weights for the check (CPU files only)
+        run: |
+          "$PY" -m pip install --quiet numpy huggingface-hub
+          "$PY" - <<'EOF'
+          from huggingface_hub import hf_hub_download
+          from flash.common.stream import REPO, REVISION
+          for f in ("lm.bin", "misc.bin", "vv.bin", "detector.bin", "bwe.bin"):
+              hf_hub_download(REPO, f"web/{f}", revision=REVISION, local_dir="weights")
+          EOF
+      - name: Build and check
+        run: $PY -m flash.common.build dist --check weights
+      - name: glibc 2.28 at most, no C++ runtime needed
+        run: |
+          for f in dist/*.so; do
+            need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$f: $need"
+            [ "$(printf '%s\nGLIBC_2.28\n' "$need" | sort -V | tail -1)" = GLIBC_2.28 ] || { echo "needs more than glibc 2.28"; exit 1; }
+            if objdump -p "$f" | grep -E 'NEEDED.*(libstdc\+\+|libgcc_s)'; then echo "needs the C++ runtime"; exit 1; fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: LLVM MinGW
+        run: |
+          curl -sSfL -o llvm-mingw.zip "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/llvm-mingw-$LLVM_MINGW-ucrt-x86_64.zip"
+          echo "$LLVM_MINGW_SHA256  llvm-mingw.zip" | sha256sum -c -
+          7z x llvm-mingw.zip -o"$RUNNER_TEMP" -bso0 -bsp0
+          cygpath -w "$RUNNER_TEMP/llvm-mingw-$LLVM_MINGW-ucrt-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Kernel tests
+        run: clang++ -O2 -std=c++17 -D_USE_MATH_DEFINES -static -I app/native -I flash/engine tests/native/kern_float_test.cpp -o kt.exe && ./kt.exe
+      - name: Weights for the check (CPU files only)
+        run: |
+          python -m pip install --quiet numpy huggingface-hub
+          python - <<'EOF'
+          from huggingface_hub import hf_hub_download
+          from flash.common.stream import REPO, REVISION
+          for f in ("lm.bin", "misc.bin", "vv.bin", "detector.bin", "bwe.bin"):
+              hf_hub_download(REPO, f"web/{f}", revision=REVISION, local_dir="weights")
+          EOF
+      - name: Build and check
+        run: python -m flash.common.build dist --check weights
+      - name: Only Windows itself needed
+        run: |
+          for f in dist/*.dll; do
+            deps=$(llvm-objdump -p "$f" | grep "DLL Name" | awk '{print $3}' | grep -v -i -E '^(kernel32|api-ms-win-.*)\.dll$' || true)
+            echo "$f: ${deps:-system DLLs only}"
+            [ -z "$deps" ] || exit 1
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Kernel tests
+        run: |
+          brew install libomp
+          omp=$(brew --prefix libomp)
+          clang++ -O2 -std=c++17 -Xpreprocessor -fopenmp -I"$omp/include" -L"$omp/lib" -lomp -I app/native tests/native/lin_q_neon_test.cpp -o kt && ./kt
+      - name: Weights for the check (CPU files only)
+        run: |
+          python -m pip install --quiet numpy huggingface-hub
+          python - <<'EOF'
+          from huggingface_hub import hf_hub_download
+          from flash.common.stream import REPO, REVISION
+          for f in ("lm.bin", "misc.bin", "vv.bin", "detector.bin", "bwe.bin"):
+              hf_hub_download(REPO, f"web/{f}", revision=REVISION, local_dir="weights")
+          EOF
+      - name: Build and check
+        run: python -m flash.common.build dist --check weights
+      - name: Only the system libraries needed
+        run: |
+          for f in dist/*.dylib; do
+            deps=$(otool -L "$f" | tail -n +3 | awk '{print $1}' | grep -v -E '^/usr/lib/(libc\+\+\.1|libSystem\.B)\.dylib$' || true)
+            echo "$f: ${deps:-system libraries only}"
+            [ -z "$deps" ] || exit 1
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flash-macos-aarch64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: The tag is the version in pyproject.toml
+        run: |
+          v=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          [ "v$v" = "$TAG" ] || { echo "pyproject.toml has version $v, the tag is $TAG"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flash-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: cd dist && sha256sum lib* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/lib*
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --notes "TontaubeV1.1 Flash: prebuilt native libraries (see SHA256SUMS)."
+          gh release upload "$TAG" dist/* --clobber

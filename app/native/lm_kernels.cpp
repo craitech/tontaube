@@ -1,18 +1,10 @@
-// AVX2 kernels for the lite codebook models on x86-64 CPUs.
-//
-// Weight formats (packed once at load time from the GPU bundle layout):
-//   q4: codes uint8 [N][K/64][32]; byte i of a group holds input i (low
-//       nibble) and input i + 32 (high nibble). fp16 scales/mins [N][K/64].
-//   q8: codes int8 [N][K/128][128] = code - 128; fp16 scales [N][K/128] and
-//       mins [N][K/128] already shifted by 128 * scale.
-//   In both, w = code * scale + min.
-// Activations are quantized to int16 per 64 inputs (rounding error ~1/32767,
-// negligible next to the weights): q, scale, and scale * sum(q) ("xsum"),
-// which carries the min term:
-//   sum_k w_k x_k = sum_g scale_g * xscale_g * dot(code, q)_g + min_g * xsum_g
+// Kernels for the lite codebook models on x86-64 CPUs: torch wrappers over kern/ (shared with the Flash
+// engine). Weight and activation formats: kern/lin_q.h.
 //
 // Decoder runs a whole one-token decode step (all layers) in one call.
 #include "common.h"
+#include "kern/attn.h"
+#include "kern/lin_q.h"
 
 namespace {
 
@@ -26,178 +18,29 @@ struct Act {  // quantized activations, M rows of K inputs
 };
 
 void quantize_rows(const float *xp, int64_t M, int64_t K, int16_t *qp, float *sp, float *xsp) {
-    const int64_t G = K / AG;
-    at::parallel_for(0, M * G, 64, [&](int64_t b, int64_t e) {
-        for (int64_t i = b; i < e; i++) {
-            const float *v = xp + i * AG;
-            float amax = 0.f;
-            for (int k = 0; k < AG; k++) amax = std::max(amax, std::fabs(v[k]));
-            const float sc = amax / 32767.f, inv = amax > 0.f ? 32767.f / amax : 0.f;
-            int64_t sum = 0;
-            for (int k = 0; k < AG; k++) {
-                int c = (int)std::nearbyint(v[k] * inv);
-                c = std::max(-32767, std::min(32767, c));
-                qp[i * AG + k] = (int16_t)c;
-                sum += c;
-            }
-            sp[i] = sc;
-            xsp[i] = sc * (float)sum;
-        }
-    });
+    kern::quant16(torch_par(), xp, K, M, K, qp, sp, xsp);
 }
 
-// y[m][n] = sum_k w[n][k] x[m][k] (+ bias), m <= 8.
-void gemv_q4_raw(const Act &a, const uint8_t *cp, const uint16_t *scp, const uint16_t *mnp,
-                 const float *bp, int64_t N, float *yp) {
-    const int64_t M = a.M, K = a.K, G = K / AG;
-    const int16_t *qp = a.q;
-    const float *sp = a.s, *xsp = a.xs;
-    const __m128i m4 = _mm_set1_epi8(0x0F);
-    at::parallel_for(0, N, 16, [&](int64_t n0, int64_t n1) {
-        for (int64_t n = n0; n < n1; n++) {
-            __m256 acc[8];
-            float mterm[8];
-            for (int m = 0; m < M; m++) { acc[m] = _mm256_setzero_ps(); mterm[m] = 0.f; }
-            const uint8_t *row = cp + n * G * 32;
-            for (int64_t g = 0; g < G; g++) {
-                const __m128i c0 = _mm_loadu_si128((const __m128i *)(row + g * 32));
-                const __m128i c1 = _mm_loadu_si128((const __m128i *)(row + g * 32 + 16));
-                // inputs 0-15, 16-31 (low nibbles) and 32-47, 48-63 (high nibbles) as int16
-                const __m256i w0 = _mm256_cvtepu8_epi16(_mm_and_si128(c0, m4));
-                const __m256i w1 = _mm256_cvtepu8_epi16(_mm_and_si128(c1, m4));
-                const __m256i w2 = _mm256_cvtepu8_epi16(_mm_and_si128(_mm_srli_epi16(c0, 4), m4));
-                const __m256i w3 = _mm256_cvtepu8_epi16(_mm_and_si128(_mm_srli_epi16(c1, 4), m4));
-                const float ws = h2f(scp[n * G + g]), wm = h2f(mnp[n * G + g]);
-                for (int m = 0; m < M; m++) {
-                    const int16_t *xq = qp + m * K + g * AG;
-                    __m256i d = _mm256_madd_epi16(w0, _mm256_loadu_si256((const __m256i *)xq));
-                    d = _mm256_add_epi32(d, _mm256_madd_epi16(w1, _mm256_loadu_si256((const __m256i *)(xq + 16))));
-                    d = _mm256_add_epi32(d, _mm256_madd_epi16(w2, _mm256_loadu_si256((const __m256i *)(xq + 32))));
-                    d = _mm256_add_epi32(d, _mm256_madd_epi16(w3, _mm256_loadu_si256((const __m256i *)(xq + 48))));
-                    acc[m] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(d), _mm256_set1_ps(ws * sp[m * G + g]), acc[m]);
-                    mterm[m] += wm * xsp[m * G + g];
-                }
-            }
-            for (int m = 0; m < M; m++) yp[m * N + n] = hsum(acc[m]) + mterm[m] + (bp ? bp[n] : 0.f);
-        }
-    });
+// y[m][n] = sum_k w[n][k] x[m][k] (+ bias); kind 0 q4, 1 q8.
+void gemv_raw(int kind, const Act &a, const void *cp, const uint16_t *scp, const uint16_t *mnp, const float *bp,
+              int64_t N, float *yp) {
+    kern::QW w;
+    w.kind = kind;
+    w.N = N;
+    w.K = a.K;
+    w.codes = (const uint8_t *)cp;
+    w.scales = scp;
+    w.mins = mnp;
+    w.bias = bp;
+    kern::lin_q(torch_par(), w, kern::QX{a.q, a.s, a.xs, a.M, a.K}, yp, N);
 }
 
-// int8 weights, group 128 (two activation groups per weight group).
-void gemv_q8_raw(const Act &a, const int8_t *cp, const uint16_t *scp, const uint16_t *mnp,
-                 const float *bp, int64_t N, float *yp) {
-    const int64_t M = a.M, K = a.K, G = K / 128, GA = K / AG;
-    const int16_t *qp = a.q;
-    const float *sp = a.s, *xsp = a.xs;
-    at::parallel_for(0, N, 16, [&](int64_t n0, int64_t n1) {
-        for (int64_t n = n0; n < n1; n++) {
-            __m256 acc[8];
-            float mterm[8];
-            for (int m = 0; m < M; m++) { acc[m] = _mm256_setzero_ps(); mterm[m] = 0.f; }
-            const int8_t *row = cp + n * G * 128;
-            for (int64_t g = 0; g < G; g++) {
-                const float ws = h2f(scp[n * G + g]), wm = h2f(mnp[n * G + g]);
-                for (int h = 0; h < 2; h++) {  // two 64-input halves (one activation group each)
-                    const int8_t *c = row + g * 128 + h * 64;
-                    __m256i w[4];
-                    for (int j = 0; j < 4; j++)
-                        w[j] = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(c + 16 * j)));
-                    const int64_t ga = g * 2 + h;
-                    for (int m = 0; m < M; m++) {
-                        const int16_t *xq = qp + m * K + ga * AG;
-                        __m256i d = _mm256_madd_epi16(w[0], _mm256_loadu_si256((const __m256i *)xq));
-                        for (int j = 1; j < 4; j++)
-                            d = _mm256_add_epi32(d, _mm256_madd_epi16(w[j], _mm256_loadu_si256((const __m256i *)(xq + 16 * j))));
-                        acc[m] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(d), _mm256_set1_ps(ws * sp[m * GA + ga]), acc[m]);
-                        mterm[m] += wm * xsp[m * GA + ga];
-                    }
-                }
-            }
-            for (int m = 0; m < M; m++) yp[m * N + n] = hsum(acc[m]) + mterm[m] + (bp ? bp[n] : 0.f);
-        }
-    });
-}
-
-// One query token against a bf16 KV cache (flash-decoding: chunks of positions
-// per KV head run in parallel, partial softmaxes are merged at the end).
-// q [nq][128] fp32; K, V: head h at K + h * ks, rows of 128; attends to rows
-// 0..L-1. out [nq * 128] fp32, head-major.
+// One query token against a bf16 KV cache (kern::attn: chunks of positions per KV head in parallel, merged).
 void attn_raw(const float *qp, const at::BFloat16 *kp, const at::BFloat16 *vp, int64_t ks, int64_t vs,
               int64_t nq, int64_t nkv, int64_t L, float fs, float *op) {
-    const int64_t rep = nq / nkv;
     const int64_t want = std::max<int64_t>(1, (3 * at::get_num_threads() + nkv - 1) / nkv);
-    const int64_t C = std::max<int64_t>(32, (L + want - 1) / want), nc = (L + C - 1) / C;
-    std::vector<float> part(nkv * nc * rep * (HD + 2));  // per chunk: acc[HD], max, sum
-    float *pp = part.data();
-    at::parallel_for(0, nkv * nc, 1, [&](int64_t t0, int64_t t1) {
-        std::vector<float> sbuf(rep * C + 8);
-        for (int64_t t = t0; t < t1; t++) {
-            const int64_t h = t / nc, c = t % nc, j0 = c * C, j1 = std::min(L, j0 + C), n = j1 - j0;
-            const at::BFloat16 *K = kp + h * ks, *V = vp + h * vs;
-            float *s = sbuf.data();
-            for (int64_t j = j0; j < j1; j++) {
-                __m256 kv[HD / 8];
-                for (int i = 0; i < HD / 8; i++) kv[i] = bf16x8(K + j * HD + 8 * i);
-                for (int r = 0; r < rep; r++) {
-                    const float *qr = qp + (h * rep + r) * HD;
-                    __m256 a = _mm256_mul_ps(kv[0], _mm256_loadu_ps(qr));
-                    for (int i = 1; i < HD / 8; i++) a = _mm256_fmadd_ps(kv[i], _mm256_loadu_ps(qr + 8 * i), a);
-                    s[r * C + (j - j0)] = hsum(a) * fs;
-                }
-            }
-            for (int r = 0; r < rep; r++) {
-                float *sr = s + r * C, mx = -INFINITY, sum = 0.f;
-                for (int64_t j = 0; j < n; j++) mx = std::max(mx, sr[j]);
-                int64_t j = 0;
-                __m256 vsum = _mm256_setzero_ps();
-                for (; j + 8 <= n; j += 8) {
-                    const __m256 e = exp_neg(_mm256_sub_ps(_mm256_loadu_ps(sr + j), _mm256_set1_ps(mx)));
-                    _mm256_storeu_ps(sr + j, e);
-                    vsum = _mm256_add_ps(vsum, e);
-                }
-                sum = hsum(vsum);
-                for (; j < n; j++) { sr[j] = std::exp(sr[j] - mx); sum += sr[j]; }
-                float *dst = pp + (t * rep + r) * (HD + 2);
-                dst[HD] = mx;
-                dst[HD + 1] = sum;
-            }
-            __m256 acc[8][HD / 8 / 2];  // half of HD per pass keeps accumulators in registers for rep <= 2
-            for (int half = 0; half < 2; half++) {
-                for (int r = 0; r < rep; r++)
-                    for (int i = 0; i < HD / 16; i++) acc[r][i] = _mm256_setzero_ps();
-                for (int64_t j = j0; j < j1; j++) {
-                    __m256 vv[HD / 16];
-                    for (int i = 0; i < HD / 16; i++) vv[i] = bf16x8(V + j * HD + half * (HD / 2) + 8 * i);
-                    for (int r = 0; r < rep; r++) {
-                        const __m256 p = _mm256_set1_ps(s[r * C + (j - j0)]);
-                        for (int i = 0; i < HD / 16; i++) acc[r][i] = _mm256_fmadd_ps(p, vv[i], acc[r][i]);
-                    }
-                }
-                for (int r = 0; r < rep; r++) {
-                    float *dst = pp + (t * rep + r) * (HD + 2) + half * (HD / 2);
-                    for (int i = 0; i < HD / 16; i++) _mm256_storeu_ps(dst + 8 * i, acc[r][i]);
-                }
-            }
-        }
-    });
-    // Merge chunks: out = sum_c e^(m_c - M) acc_c / sum_c e^(m_c - M) l_c
-    at::parallel_for(0, nq, 1, [&](int64_t h0, int64_t h1) {
-        for (int64_t hq = h0; hq < h1; hq++) {
-            const int64_t h = hq / rep, r = hq % rep;
-            float M = -INFINITY, den = 0.f;
-            for (int64_t c = 0; c < nc; c++) M = std::max(M, pp[((h * nc + c) * rep + r) * (HD + 2) + HD]);
-            float *o = op + hq * HD;
-            for (int i = 0; i < HD; i++) o[i] = 0.f;
-            for (int64_t c = 0; c < nc; c++) {
-                const float *src = pp + ((h * nc + c) * rep + r) * (HD + 2);
-                const float w = std::exp(src[HD] - M);
-                den += w * src[HD + 1];
-                for (int i = 0; i < HD; i++) o[i] += w * src[i];
-            }
-            const float inv = 1.f / den;
-            for (int i = 0; i < HD; i++) o[i] *= inv;
-        }
-    });
+    const int64_t C = std::max<int64_t>(32, (L + want - 1) / want);
+    kern::attn<kern::KV_BF16>(torch_par(), qp, (const uint16_t *)kp, (const uint16_t *)vp, ks, vs, nq, nkv, L, fs, C, op);
 }
 
 // out = x * rsqrt(mean(x^2) + eps) * w
@@ -235,9 +78,9 @@ torch::Tensor gemv_q4(torch::Tensor q, torch::Tensor s, torch::Tensor xs, torch:
     const int64_t M = q.size(0), K = q.size(1), N = codes.size(0);
     TORCH_CHECK(M <= 8 && codes.size(1) == K / AG && codes.size(2) == 32);
     auto y = torch::empty({M, N}, torch::kFloat32);
-    gemv_q4_raw({q.data_ptr<int16_t>(), s.data_ptr<float>(), xs.data_ptr<float>(), M, K},
-                codes.data_ptr<uint8_t>(), half_ptr(scales), half_ptr(mins),
-                bias.has_value() ? bias->data_ptr<float>() : nullptr, N, y.data_ptr<float>());
+    gemv_raw(0, {q.data_ptr<int16_t>(), s.data_ptr<float>(), xs.data_ptr<float>(), M, K},
+             codes.data_ptr<uint8_t>(), half_ptr(scales), half_ptr(mins),
+             bias.has_value() ? bias->data_ptr<float>() : nullptr, N, y.data_ptr<float>());
     return y;
 }
 
@@ -246,9 +89,9 @@ torch::Tensor gemv_q8(torch::Tensor q, torch::Tensor s, torch::Tensor xs, torch:
     const int64_t M = q.size(0), K = q.size(1), N = codes.size(0);
     TORCH_CHECK(M <= 8 && codes.size(1) == K / 128 && codes.size(2) == 128);
     auto y = torch::empty({M, N}, torch::kFloat32);
-    gemv_q8_raw({q.data_ptr<int16_t>(), s.data_ptr<float>(), xs.data_ptr<float>(), M, K},
-                codes.data_ptr<int8_t>(), half_ptr(scales), half_ptr(mins),
-                bias.has_value() ? bias->data_ptr<float>() : nullptr, N, y.data_ptr<float>());
+    gemv_raw(1, {q.data_ptr<int16_t>(), s.data_ptr<float>(), xs.data_ptr<float>(), M, K},
+             codes.data_ptr<int8_t>(), half_ptr(scales), half_ptr(mins),
+             bias.has_value() ? bias->data_ptr<float>() : nullptr, N, y.data_ptr<float>());
     return y;
 }
 
@@ -391,10 +234,7 @@ class Decoder {
         quantize_rows(x, 1, K, qbuf_.data(), s, xs);
         const Act act{qbuf_.data(), s, xs, 1, K};
         const float *bp = w[3].numel() ? w[3].data_ptr<float>() : nullptr;
-        if (kinds_[4 * l + j] == 0)
-            gemv_q4_raw(act, w[0].data_ptr<uint8_t>(), half_ptr(w[1]), half_ptr(w[2]), bp, w[0].size(0), y);
-        else
-            gemv_q8_raw(act, w[0].data_ptr<int8_t>(), half_ptr(w[1]), half_ptr(w[2]), bp, w[0].size(0), y);
+        gemv_raw((int)kinds_[4 * l + j], act, w[0].data_ptr(), half_ptr(w[1]), half_ptr(w[2]), bp, w[0].size(0), y);
     }
 
     std::vector<torch::Tensor> norms_, lins_;

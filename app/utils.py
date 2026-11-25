@@ -27,14 +27,11 @@ from app.config import (
 )
 from app.logging_utils import get_logger
 from app.model.text_vocab import char_token_id, clean_text, is_model_token
+from app.voice_catalog import VoicePromptError
 
 logger = get_logger("audio")
 
 _SPECIAL_TOKEN_RE = re.compile(r'(<\|[^|]+\|>|<<[^>]+>>|\|\|)')
-
-
-class VoicePromptError(ValueError):
-    """The supplied voice reference cannot be used."""
 
 
 def free_memory():

@@ -117,6 +117,46 @@ async function selectedVoiceBase64() {
   return audioBlobBase64(await response.blob());
 }
 
+// --- Request fields the server reads -------------------------------------------
+// GET /controls of a server whose model reads only some request fields (TontaubeV1.1 Flash) lists them as `fields`,
+// with the model's name. The inputs of the other fields are disabled and not sent. null: every field (TontaubeV1.1).
+
+let serverFields = null;
+const fieldInputs = {
+  language: ["language"], tag: ["tag"], prompt_max_tokens: ["prompt-max-tokens"],
+  voice_audio_b64: ["voice-select", "refresh-voices", "voice-file"], voice_path: ["voice-path"],
+  voice_tokens: ["voice-tokens"], prefix_text: ["prefix-text"], prefix_tokens: ["prefix-tokens"],
+  top_p: ["top-p"], top_k: ["top-k"], frequency_penalty: ["frequency-penalty"],
+  silence_logit_bias: ["silence-logit-bias"], acoustic_temperature: ["acoustic-temperature"],
+  acoustic_top_k: ["acoustic-top-k"], max_new_tokens: ["max-new-tokens"],
+  streaming_initial_seconds: ["streaming-initial-seconds"], vllm_priority: ["vllm-priority"],
+  vibevoice_postprocess: ["vibevoice-postprocess"],
+};
+
+function supported(field) {
+  return !serverFields || serverFields.includes(field);
+}
+
+function setServerFields(fields, model) {
+  const limited = Array.isArray(fields);
+  if (limited !== Boolean(serverFields)) {
+    // Flash reads written text with its built-in verbalizer unless told not to; TontaubeV1.1's is optional.
+    byId("use-verbalization").checked = limited;
+    byId("verbalization-hint").textContent = limited ? "Built into this model" : "Requires the optional server model";
+  }
+  serverFields = limited ? fields : null;
+  for (const [field, ids] of Object.entries(fieldInputs)) {
+    for (const id of ids) byId(id).disabled = !supported(field);
+  }
+  if (!supported("language")) byId("language").value = "english";
+  byId("voice-upload").hidden = !supported("voice_audio_b64");
+  byId("voice-hint").textContent = supported("voice_audio_b64")
+    ? "Sample voices are read from the UI's local voice folder and uploaded with each request. Uploading a reference below overrides the selected sample."
+    : `${model || "This server's model"} has one voice, Marcus, and speaks English.`;
+  byId("sliders-card").hidden = !supported("controls");
+  syncTransportState();
+}
+
 // --- Style sliders -----------------------------------------------------------
 // The catalog comes from GET /controls. A slider the user has not touched is "Model
 // default" and is not sent. A range input has no empty value, so an untouched slider
@@ -312,6 +352,7 @@ function cancelControlsWork() {
 function controlsUnavailable(message) {
   clearSliders();
   controlsRetryWanted = false;
+  byId("sliders-card").hidden = false;
   setSliderStatus("error", message);
 }
 
@@ -350,6 +391,7 @@ async function loadControls() {
     controlsRetryWanted = false;
     controlsRetries = 0;
     showCatalog(Array.isArray(body.controls) ? body.controls : []);
+    setServerFields(body.fields, body.model);
     setConnection("connected", "Server ready");
   } catch (error) {
     if (request !== controlsRequest) return;  // superseded, or cancelled while hidden
@@ -422,23 +464,25 @@ async function buildPayload(streaming) {
 
   const promptCap = optionalNumber("prompt-max-tokens");
   if (promptCap !== undefined) payload.prompt_max_tokens = promptCap;
-  const uploaded = await voiceFileBase64();
-  const manualVoicePath = byId("voice-path").value.trim();
-  const voiceTokens = optionalJson("voice-tokens", "Voice tokens");
-  const explicitVoiceSources = [Boolean(uploaded), Boolean(manualVoicePath), voiceTokens !== undefined]
-    .filter(Boolean).length;
-  if (explicitVoiceSources > 1) {
-    throw new Error("Provide only one uploaded voice, server-side voice path, or set of voice-token rows.");
-  }
-  if (uploaded) payload.voice_audio_b64 = uploaded;
-  else if (manualVoicePath) payload.voice_path = manualVoicePath;
-  else if (voiceTokens !== undefined) payload.voice_tokens = voiceTokens;
-  else {
-    const selected = await selectedVoiceBase64();
-    if (selected) payload.voice_audio_b64 = selected;
-  }
-  if (!payload.voice_audio_b64 && !payload.voice_path && payload.voice_tokens === undefined) {
-    throw new Error("Select a sample voice, upload a voice reference, or provide a server path or token rows.");
+  if (supported("voice_audio_b64")) {
+    const uploaded = await voiceFileBase64();
+    const manualVoicePath = byId("voice-path").value.trim();
+    const voiceTokens = optionalJson("voice-tokens", "Voice tokens");
+    const explicitVoiceSources = [Boolean(uploaded), Boolean(manualVoicePath), voiceTokens !== undefined]
+      .filter(Boolean).length;
+    if (explicitVoiceSources > 1) {
+      throw new Error("Provide only one uploaded voice, server-side voice path, or set of voice-token rows.");
+    }
+    if (uploaded) payload.voice_audio_b64 = uploaded;
+    else if (manualVoicePath) payload.voice_path = manualVoicePath;
+    else if (voiceTokens !== undefined) payload.voice_tokens = voiceTokens;
+    else {
+      const selected = await selectedVoiceBase64();
+      if (selected) payload.voice_audio_b64 = selected;
+    }
+    if (!payload.voice_audio_b64 && !payload.voice_path && payload.voice_tokens === undefined) {
+      throw new Error("Select a sample voice, upload a voice reference, or provide a server path or token rows.");
+    }
   }
   const prefixTokens = optionalJson("prefix-tokens", "Prefix tokens");
   if (prefixTokens !== undefined) payload.prefix_tokens = prefixTokens;
@@ -451,6 +495,9 @@ async function buildPayload(streaming) {
     payload.format = byId("format").value;
     const vllmPriority = optionalNumber("vllm-priority");
     if (vllmPriority !== undefined) payload.vllm_priority = vllmPriority;
+  }
+  for (const field of Object.keys(payload)) {
+    if (!supported(field)) delete payload[field];
   }
   return payload;
 }
@@ -656,8 +703,8 @@ async function refreshVoices(quiet = false) {
 function syncTransportState() {
   const streaming = document.querySelector('input[name="transport"]:checked').value === "stream";
   byId("format").disabled = streaming;
-  byId("vllm-priority").disabled = streaming;
-  byId("streaming-initial-seconds").disabled = !streaming;
+  byId("vllm-priority").disabled = streaming || !supported("vllm_priority");
+  byId("streaming-initial-seconds").disabled = !streaming || !supported("streaming_initial_seconds");
   if (streaming) byId("format").value = "mp3";
 }
 

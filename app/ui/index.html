@@ -76,7 +76,7 @@
               </label>
               <label>Prompt token cap<input id="prompt-max-tokens" type="number" min="1" max="750" step="1" value="750"></label>
             </div>
-            <p class="hint voice-hint">Sample voices are read from the UI's local voice folder and uploaded with each request. Uploading a reference below overrides the selected sample.</p>
+            <p id="voice-hint" class="hint voice-hint">Sample voices are read from the UI's local voice folder and uploaded with each request. Uploading a reference below overrides the selected sample.</p>
             <div id="voice-upload" class="upload-zone">
               <input id="voice-file" type="file" accept="audio/*,.wav,.mp3,.opus,.ogg,.m4a,.aac,.flac">
               <label for="voice-file"><span class="upload-icon">↑</span><strong>Choose a voice reference</strong><span>Clean, single-speaker audio · up to 60 seconds</span></label>
@@ -129,7 +129,7 @@
               <label>Request priority<select id="priority"><option value="low">Low</option><option value="high">High</option></select></label>
               <label>vLLM priority <span class="optional">complete file only</span><input id="vllm-priority" type="number" step="1" placeholder="Unset"></label>
               <label>VibeVoice processing<select id="vibevoice-postprocess"><option value="">Server default</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
-              <label class="checkbox-field"><input id="use-verbalization" type="checkbox"><span><strong>English verbalization</strong><small>Requires the optional server model</small></span></label>
+              <label class="checkbox-field"><input id="use-verbalization" type="checkbox"><span><strong>English verbalization</strong><small id="verbalization-hint">Requires the optional server model</small></span></label>
             </div>
             <label>Prefix text <span class="optional">optional, up to 350 characters</span><textarea id="prefix-text" class="small-textarea" maxlength="350" placeholder="Text spoken immediately before this request"></textarea></label>
             <details class="developer-fields">

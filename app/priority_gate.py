@@ -50,6 +50,10 @@ class PriorityGate:
             return
         await self._idle.wait()
 
+    def holds_low(self) -> bool:
+        """wait_if_low would wait now; for worker threads outside the event loop (app/flash.py)."""
+        return self._enabled and not self._idle.is_set()
+
     def high(self) -> "_HighScope":
         return _HighScope(self)
 

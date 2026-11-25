@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tontaube-inference"
-version = "1.1.2"
+version = "1.2.0"
 description = "Inference server for Tontaube text-to-speech"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -16,17 +16,27 @@ license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "VibeVoice/LICENSE"
 # Torch builds. These extras only select where torch, torchaudio and torchvision
 # come from (see [tool.uv.sources]); the versions match requirements.txt and uv.lock.
 # A plain install uses the PyPI build. "cu126" is the CUDA 12.6 build for GPUs that
-# the PyPI build no longer supports (Pascal and older). "default" exists only so uv
-# can declare the two builds as mutually exclusive; it adds nothing.
+# the PyPI build no longer supports (Pascal and older). "cpu" is the much smaller
+# CPU-only build, for Linux machines without an NVIDIA GPU. "default" exists only so
+# uv can declare the builds as mutually exclusive; it adds nothing.
 default = []
 cu126 = [
     "torch==2.9.1",
     "torchaudio==2.9.1",
     "torchvision==0.24.1",
 ]
+cpu = [
+    "torch==2.9.1; sys_platform == 'linux'",
+    "torchaudio==2.9.1; sys_platform == 'linux'",
+]
 dev = [
+    "httpx>=0.27,<1",
     "pytest>=8,<9",
     "pytest-asyncio>=0.24,<2",
+]
+# The vLLM backend (TTS_BACKEND=vllm; Linux with an NVIDIA GPU): uv sync --extra vllm
+vllm = [
+    "vllm==0.16.0; sys_platform == 'linux'",
 ]
 
 [project.entry-points."vllm.general_plugins"]
@@ -36,7 +46,8 @@ tontaube = "app.model.vllm_plugin:register"
 tontaube = "app.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["app*", "VibeVoice*", "voices*"]
+include = ["app*", "VibeVoice*", "voices*", "flash*"]
+exclude = ["flash.extension*", "flash.web*"]
 namespaces = true
 
 [tool.setuptools.package-data]
@@ -51,6 +62,14 @@ app = [
     "lite/quantize/calibration_texts.json",
     "native/*.cpp",
     "native/*.h",
+    "native/kern/*.h",
+    "native/kern/*.inc",
+]
+# TontaubeV1.1 Flash: the engines' C++ sources are built on first use.
+flash = [
+    "**/*.cpp",
+    "**/*.h",
+    "gpu/*.json",
 ]
 voices = [
     "LICENSE",
@@ -69,6 +88,7 @@ voices = [
 dependencies = {file = ["requirements.txt"]}
 
 [tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "requirements.txt" }]   # the dependencies are read from requirements.txt
 constraint-dependencies = [
     "grpcio-reflection==1.81.1",
 ]
@@ -76,15 +96,20 @@ override-dependencies = [
     "protobuf>=6.33.5,<7",
 ]
 conflicts = [
-    [{ extra = "default" }, { extra = "cu126" }],
+    [{ extra = "default" }, { extra = "cu126" }, { extra = "cpu" }],
 ]
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu126", extra = "cu126" }]
-torchaudio = [{ index = "pytorch-cu126", extra = "cu126" }]
+torch = [{ index = "pytorch-cu126", extra = "cu126" }, { index = "pytorch-cpu", extra = "cpu" }]
+torchaudio = [{ index = "pytorch-cu126", extra = "cu126" }, { index = "pytorch-cpu", extra = "cpu" }]
 torchvision = [{ index = "pytorch-cu126", extra = "cu126" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true

@@ -1,19 +1,19 @@
 # Direct runtime dependencies. Transitive packages are resolved by the
 # installer; use uv so the compatibility rules in pyproject.toml are applied.
-dualcodec==0.4.2
+# Windows and macOS get only what TontaubeV1.1 Flash needs on the CPU. vLLM is the extra "vllm" (pyproject.toml).
+dualcodec==0.4.2; sys_platform == 'linux'
 fastapi>=0.115,<1
 huggingface-hub>=0.34,<2
 lameenc==1.8.2
-librosa>=0.10.2,<1.1
+librosa>=0.10.2,<1.1; sys_platform == 'linux'
 numpy>=1.26,<3
 opuslib==3.0.1
 pydantic>=2.12,<3
 pydub==0.25.1
-rotary-embedding-torch==0.8.3
-scipy>=1.10,<2
+rotary-embedding-torch==0.8.3; sys_platform == 'linux'
+scipy>=1.10,<2; sys_platform == 'linux'
 soundfile==0.13.1
-torch==2.9.1
-torchaudio==2.9.1
-transformers>=4.56,<5
+torch==2.9.1; sys_platform == 'linux'
+torchaudio==2.9.1; sys_platform == 'linux'
+transformers>=4.56,<5; sys_platform == 'linux'
 uvicorn[standard]>=0.40,<1
-vllm==0.16.0

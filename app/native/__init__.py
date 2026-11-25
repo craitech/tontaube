@@ -1,9 +1,9 @@
-"""AVX2 kernels for x86-64 CPUs, compiled on first use and cached.
+"""x86-64 kernels (AVX2; AVX-512 / AVX-VNNI where the CPU has them), compiled on first use and cached.
 
-lm_kernels.cpp serves the lite codebook models on the CPU (app/lite/cpu),
-vibevoice_kernels.cpp the VibeVoice tokenizer (app/codec/vibevoice_cpu.py);
-both are one extension module. Building needs a C++ compiler; the result is
-cached in TONTAUBE_CACHE_DIR (default ~/.cache/tontaube).
+lm_kernels.cpp serves the lite codebook models on the CPU (app/lite/cpu) through kern/ (shared with the
+Flash engine), vibevoice_kernels.cpp the VibeVoice tokenizer (app/codec/vibevoice_cpu.py); both are one
+extension module. Building needs a C++ compiler; the result is cached in TONTAUBE_CACHE_DIR (default
+~/.cache/tontaube).
 """
 from __future__ import annotations
 

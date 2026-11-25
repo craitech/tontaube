@@ -2,6 +2,15 @@
 import numpy as np
 
 
+def pcm16(audio) -> np.ndarray:
+    """int16 samples of a float waveform in [-1, 1] (a torch tensor, or a numpy array from TontaubeV1.1 Flash)."""
+    if isinstance(audio, np.ndarray):
+        samples = audio.reshape(-1).astype(np.float32, copy=False)
+    else:
+        samples = audio.squeeze().cpu().float().numpy()
+    return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+
+
 class Mp3StreamWriter:
     """Incrementally encodes audio chunks to a continuous MP3 stream.
 
@@ -19,12 +28,10 @@ class Mp3StreamWriter:
         self._encoder.set_quality(2)
         self._started = False
 
-    def write_chunk(self, audio: 'torch.Tensor') -> bytes:
+    def write_chunk(self, audio) -> bytes:
         """Encode audio chunk and return MP3 frame bytes."""
         self._started = True
-        samples = audio.squeeze().cpu().float().numpy()
-        pcm_s16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-        return self._encoder.encode(pcm_s16)
+        return self._encoder.encode(pcm16(audio).tobytes())
 
     def close(self) -> bytes:
         """Flush the encoder and return remaining MP3 bytes."""

@@ -29,6 +29,25 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="HTTP port (default: TTS_PORT, PORT, or 8080)",
     )
+    serve.add_argument(
+        "--model",
+        choices=["v1.1", "flash"],
+        default=None,
+        help="TontaubeV1.1 or TontaubeV1.1 Flash (default: TTS_MODEL or v1.1)",
+    )
+    serve.add_argument(
+        "--device",
+        choices=["gpu", "cpu"],
+        default=None,
+        help="where the model runs (default: LITE_DEVICE, else the GPU when one is available)",
+    )
+    serve.add_argument(
+        "--rate",
+        type=int,
+        choices=[48000, 24000],
+        default=None,
+        help="TontaubeV1.1 Flash: output sample rate; 24000 is faster (default: FLASH_SAMPLE_RATE or 48000)",
+    )
 
     ui = commands.add_parser("ui", help="start the standalone browser interface")
     ui.add_argument(
@@ -88,6 +107,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.print_help()
         return
     if args.command == "serve":
+        # app.config reads these when it is first imported.
+        if args.model:
+            os.environ["TTS_MODEL"] = args.model
+        if args.device:
+            os.environ["LITE_DEVICE"] = "cuda" if args.device == "gpu" else "cpu"
+        if args.rate:
+            os.environ["FLASH_SAMPLE_RATE"] = str(args.rate)
         # Before anything imports torch models or downloads weights: a GPU that the
         # installed PyTorch build does not support is handled here, not after minutes
         # of downloads (see app/torch_variant.py). `preflight` does not touch the GPU.

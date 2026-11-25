@@ -110,6 +110,7 @@ class _Engine:
     """Streams like a machine at `rate`x real time, recording the timings the real engine would."""
 
     vv_tokenizer = object()
+    can_stream = True
     verbalizer = None
 
     def __init__(self, rate=3.0):

@@ -2404,6 +2404,11 @@ class TTSEngine:
             rtf,
         )
 
+    @property
+    def can_stream(self) -> bool:
+        """The streaming routes need VibeVoice."""
+        return self.vv_tokenizer is not None
+
     def unload(self):
         for engine in self.engines:
             shutdown_engine(engine)

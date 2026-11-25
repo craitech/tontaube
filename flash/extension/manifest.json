@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "TontaubeV1.1 Flash",
+  "short_name": "Tontaube Flash",
+  "version": "1.2.0",
+  "description": "Reads web pages and selected text aloud with a natural English voice. Runs on your computer, so your text stays private.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Read aloud",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "offscreen",
+    "storage",
+    "unlimitedStorage"
+  ],
+  "commands": {
+    "read-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+R"
+      },
+      "description": "Read the selection, else the page"
+    },
+    "stop": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Stop reading"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
+  }
+}

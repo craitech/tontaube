@@ -2,14 +2,34 @@
   <img src="assets/tontaube-logo.png" alt="Tontaube" width="180">
 </p>
 
-<h1 align="center">TontaubeV1.1</h1>
+<h1 align="center">Tontaube</h1>
 
-TontaubeV1.1 is a multilingual text-to-speech model by Craitech. It is designed
+Text-to-speech models by Tontaube.
+
+| | TontaubeV1.1 | TontaubeV1.1 Flash (new) |
+|---|---|---|
+| Best for | Expressive voices, voice cloning, long-form speech | Fastest streaming, on-device |
+| Languages | English and German, plus Spanish, French, Italian, Dutch and Portuguese | English |
+| Voices | Voice cloning, preset voices, style sliders | One voice (Marcus) |
+| Runs on | NVIDIA GPU or CPU, as a server | NVIDIA GPU, CPU (Linux, Windows, macOS) or inside Chrome; natively on phones in development |
+| Weights | [TontaubeV1.1-int4](https://huggingface.co/TontaubeAI/TontaubeV1.1-int4) · [TontaubeV1.1](https://huggingface.co/TontaubeAI/TontaubeV1.1) | [TontaubeV1.1-Flash](https://huggingface.co/TontaubeAI/TontaubeV1.1-Flash) |
+| Weights license | Tontaube Community Model License | Apache 2.0 |
+| Get started | [Quick start](#quick-start) | [Quick start](#tontaubev11-flash) · [flash/](flash/README.md) · [Try it in your browser](https://huggingface.co/spaces/TontaubeAI/TontaubeV1.1-Flash) |
+
+TontaubeV1.1 Flash is new in this release. It is a small English model that
+streams speech at about 25-30x real time on an NVIDIA GPU and at about 2-4x
+real time on a CPU. It comes with a Chrome extension that reads web pages
+aloud on your own computer. See [flash/](flash/README.md), or
+[try it in your browser](https://huggingface.co/spaces/TontaubeAI/TontaubeV1.1-Flash).
+
+The rest of this page covers TontaubeV1.1.
+
+TontaubeV1.1 is a multilingual text-to-speech model by Tontaube. It is designed
 for expressive voice cloning, long-form speech, and low-latency streaming, with
 first-class support for English and German and additional support for Spanish,
 French, Italian, Dutch, and Portuguese.
 
-This repository contains the inference server. By default it runs the 4-bit
+This repository contains its inference server. By default it runs the 4-bit
 model on small NVIDIA GPUs or on CPUs; a vLLM backend serves the full-precision
 model on larger GPUs. The model weights are distributed separately. All enabled
 models are downloaded from their original Hugging Face repositories on first
@@ -27,7 +47,7 @@ an x86-64 CPU, [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
 FFmpeg, and the Opus runtime. Clone the release and start the server:
 
 ```bash
-git clone --branch v1.1.1 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.2.0 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run --python 3.12 --frozen tontaube serve
 ```
@@ -112,6 +132,47 @@ does not need the sample files. References live together in `voices/samples/`;
 optional language and style metadata in `voices/manifest.json` controls language
 filtering and groups the voice menu by style.
 
+### TontaubeV1.1 Flash
+
+With the same checkout, speak a text with Flash on an NVIDIA GPU (Linux) or on
+the CPU (Linux, Windows and macOS on Apple silicon). The weights and, on the
+CPU, the prebuilt engine are downloaded on first use:
+
+```bash
+uv run python flash/speak.py "Welcome to Tontaube Flash." --wav flash.wav
+uv run python flash/speak.py --device cpu "Welcome to Tontaube Flash." --wav flash.wav
+```
+
+| | Tested on | Speed |
+|---|---|---|
+| GPU engine (command line, server) | Linux with an NVIDIA GPU | about 25-30x real time per stream, over 100x across many streams at once (RTX 3090); first audio after about 10 ms |
+| CPU engine (command line, server) | Linux, Windows, macOS (Apple silicon) | about 2-4x real time, depending on the CPU |
+| Chrome extension | Linux, Windows | about 2x real time on a desktop, 3-6x with its graphics card |
+| [Demo page](https://huggingface.co/spaces/TontaubeAI/TontaubeV1.1-Flash) on a phone | Chrome on Android | about real time (Pixel 8) |
+| Phone engine (native) | in development | TBD |
+
+To host it with the server instead, with the same `/predict`, `/stream` and `/ws/stream` requests
+(without TontaubeV1.1's voice and style fields):
+
+```bash
+uv run tontaube serve --model flash --device gpu
+uv run tontaube serve --model flash --device cpu
+```
+
+On Linux without an NVIDIA GPU, add `--extra cpu` to every `uv run` command
+for PyTorch's much smaller CPU-only build, for example
+`uv run --extra cpu tontaube serve --model flash --device cpu`.
+
+For CPU hosting, `Dockerfile.cpu` builds a small image (see
+[flash/](flash/README.md#server)). The default environment no longer includes
+vLLM; `uv sync --extra vllm` adds it for TontaubeV1.1's
+[vLLM backend](#vllm-backend).
+
+To have web pages read aloud on your own computer, load `flash/extension` in
+Chrome (*Load unpacked* on `chrome://extensions`). See
+[flash/](flash/README.md) for the extension's settings, Windows and macOS, the
+options, the Python API and the server.
+
 ## Installation details
 
 ### Requirements
@@ -128,13 +189,14 @@ sudo apt-get update
 sudo apt-get install -y ffmpeg libopus0
 ```
 
-Native Windows, macOS, and non-NVIDIA accelerators are not supported; Windows
-users can use a CUDA-enabled WSL2 Linux environment. The default backend loads
+TontaubeV1.1 does not support native Windows, macOS, or non-NVIDIA
+accelerators; Windows users can use a CUDA-enabled WSL2 Linux environment
+(TontaubeV1.1 Flash runs natively on Windows and macOS on the CPU). The default backend loads
 in about 4 GiB of GPU memory and peaks at about 6.5 GiB. The
 [vLLM backend](#vllm-backend) needs at least 24 GiB.
 
 The application pins the Tontaube weights and upstream model revisions for
-release `v1.1.1`. For a later release, use its matching source tag; do not mix
+release `v1.2.0`. For a later release, use its matching source tag; do not mix
 model bundles and inference code from different releases. While the Tontaube
 repositories are private or gated, provide a read-only `HF_TOKEN`.
 
@@ -210,7 +272,7 @@ narrow override and lock file. Use the dedicated pip procedure below instead.
 ### pip
 
 The checked-in `requirements-pip.lock` contains the same resolved environment
-as `uv.lock`, including hashes. Install every locked dependency without
+as `uv.lock` with the vLLM extra, including hashes. Install every locked dependency without
 re-resolving upstream metadata, then install Tontaube itself:
 
 ```bash
@@ -233,18 +295,22 @@ encapsulated in an image. Install Docker Engine and the NVIDIA Container
 Toolkit, then build and run:
 
 ```bash
-docker build -t tontaube:1.1.1 .
+docker build -t tontaube:1.2.0 .
 
 docker run --rm --gpus all --ipc=host \
   -p 127.0.0.1:8080:8080 \
   -v tontaube-hf-cache:/root/.cache/huggingface \
   -v tontaube-cache:/root/.cache/tontaube \
-  tontaube:1.1.1
+  tontaube:1.2.0
 ```
 
 The named volumes preserve downloaded models and the prepared VibeVoice
 acoustic component across container runs. Pass `-e HF_TOKEN` while the
 Tontaube model repositories are private or gated.
+
+The same image serves TontaubeV1.1 Flash with `-e TTS_MODEL=flash`. For Flash
+on a CPU, `Dockerfile.cpu` builds a much smaller image without CUDA or vLLM;
+see [flash/](flash/README.md#server).
 
 ## Highlights
 
@@ -541,6 +607,34 @@ server measures the machine at startup (about 6 s on a GTX 1070 Ti, 20 s on a
 desktop CPU) and chooses the value per stream from the length of its first
 segments. Below about four times real time, long first segments still pause.
 
+### OpenAI-compatible API
+
+The server also answers OpenAI's text-to-speech API, so tools built for it
+work with Tontaube unchanged; their base URL is `http://127.0.0.1:8080/v1`:
+
+```bash
+curl -s http://127.0.0.1:8080/v1/audio/speech -H 'content-type: application/json' \
+  -d '{"model": "tts-1", "input": "Hello from Tontaube.", "voice": "alloy"}' -o hello.mp3
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+with client.audio.speech.with_streaming_response.create(
+        model="tts-1", voice="alloy", input="Hello from Tontaube.") as response:
+    response.stream_to_file("hello.mp3")
+```
+
+`POST /v1/audio/speech` takes `model` (any name), `input`, `voice`,
+`response_format` and `speed` (1.0 only). The formats are `mp3` (default),
+`opus`, `wav` and `pcm` (16-bit mono at 24 kHz, as in OpenAI's API), plus
+`aac` and `flac` where FFmpeg is installed; `mp3`, `opus` and `pcm` stream as
+they are made. TontaubeV1.1 uses the voice of that name where there is one and
+its default voice otherwise; Flash has one voice. `GET /v1/models` lists the
+served model. With an API key required, the key also works as
+`Authorization: Bearer <key>`. Errors come in OpenAI's format.
+
 ### Word and character timestamps
 
 Set `include_timestamps: true` on an English `/predict` request to get the time
@@ -588,6 +682,10 @@ The main runtime settings are environment variables:
 
 | Variable | Purpose |
 |---|---|
+| `TTS_MODEL` | `v1.1` (default) or `flash` ([TontaubeV1.1 Flash](flash/README.md#server)); `tontaube serve --model` sets it |
+| `FLASH_MODEL_PATH` | Optional local copy of the TontaubeV1.1 Flash weights, laid out as on Hugging Face |
+| `FLASH_ENGINES` | TontaubeV1.1 Flash: requests answered at once; by default up to 64 on the GPU and one on the CPU |
+| `FLASH_SAMPLE_RATE` | TontaubeV1.1 Flash: `48000` (default) or `24000`, which is faster; `tontaube serve --rate` sets it |
 | `TTS_BACKEND` | `lite` (default: the 4-bit model, GPU or CPU) or `vllm` (full precision) |
 | `TONTAUBE_TORCH_VARIANT` | PyTorch build check at start: `auto` (default), `default` (skip the check), or `cu126` (CUDA 12.6 build for older GPUs) |
 | `TTS_MODEL_REPO_ID` | HF repository containing `cb0/` through `cb3/`; defaults to `TontaubeAI/TontaubeV1.1-int4` (`TontaubeAI/TontaubeV1.1` with vLLM) |
@@ -640,7 +738,7 @@ docker run --rm --gpus all --ipc=host \
   -e MODEL_PATH=/srv/models \
   -e REQUIRE_API_KEY=1 \
   -e TTS_API_KEY="replace-with-a-secret" \
-  tontaube:1.1.1
+  tontaube:1.2.0
 ```
 
 To enable the verbalizer, set `ENABLE_VERBALIZATION=1`. It must resolve and load
@@ -693,10 +791,11 @@ needs a GPU; leave `ENABLE_VERBALIZATION` unset on a machine without one.
 `TTS_BACKEND=vllm` serves the full-precision `TontaubeAI/TontaubeV1.1` with one
 vLLM engine per codebook, for higher throughput on larger GPUs. It needs an
 NVIDIA GPU with at least 24 GiB of VRAM for the `low-vram` or default `balanced`
-profile, and at least 32 GiB for `high-throughput`:
+profile, and at least 32 GiB for `high-throughput`. vLLM is not part of the
+default environment; `--extra vllm` adds it (Linux only):
 
 ```bash
-TTS_BACKEND=vllm TTS_CAPACITY_PROFILE=low-vram uv run tontaube serve
+TTS_BACKEND=vllm TTS_CAPACITY_PROFILE=low-vram uv run --extra vllm tontaube serve
 ```
 
 All per-codebook variables are ordered `cb0,cb1,cb2,cb3`:
@@ -726,9 +825,10 @@ constraint in AudioTools 0.7.2, which is pulled by DualCodec 0.4.2:
 uv sync --frozen --python 3.12 --extra dev
 ```
 
-This creates `.venv` and registers the custom Tontaube architecture as a vLLM
-plugin in the API process and its engine workers. `uv sync` without
-`--extra dev` installs only the runtime dependencies. A plain `pip install .`
+This creates `.venv`; `uv sync` without `--extra dev` installs only the runtime
+dependencies. With `--extra vllm` as well, the environment has vLLM and
+registers the custom Tontaube architecture as a vLLM plugin in the API process
+and its engine workers. A plain `pip install .`
 cannot resolve the mutually exclusive protobuf metadata published by vLLM
 0.16.0 and AudioTools 0.7.2; the Docker build uses the same explicit override
 through uv's pip-compatible installer.

@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ENABLE_VERBALIZATION=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg && \
+    ffmpeg g++ && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
@@ -24,6 +24,7 @@ RUN python3 -m pip install --no-cache-dir --no-deps --require-hashes \
 COPY README.md LICENSE NOTICE THIRD_PARTY_NOTICES /srv/
 COPY app /srv/app
 COPY VibeVoice /srv/VibeVoice
+COPY flash /srv/flash
 COPY voices /srv/voices
 RUN pip install --no-cache-dir --no-deps --no-build-isolation /srv
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

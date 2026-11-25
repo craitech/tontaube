@@ -26,6 +26,15 @@ def test_serve_routes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [("0.0.0.0", 9000)]
 
 
+def test_serve_rate_sets_the_flash_sample_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLASH_SAMPLE_RATE", "48000")
+    monkeypatch.setitem(__import__("sys").modules, "app.main", SimpleNamespace(main=lambda **kwargs: None))
+
+    cli.main(["serve", "--rate", "24000"])
+
+    assert __import__("os").environ["FLASH_SAMPLE_RATE"] == "24000"
+
+
 def test_ui_routes_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, int]] = []
     monkeypatch.setitem(

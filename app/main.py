@@ -9,6 +9,7 @@ if multiprocessing.get_start_method(allow_none=True) is None:
     multiprocessing.set_start_method('spawn')
 
 import base64
+import contextlib
 from contextlib import asynccontextmanager
 import io
 import json
@@ -17,7 +18,9 @@ import secrets
 import time
 from typing import Literal
 
+import numpy as np
 import soundfile as sf
+from numpy.lib.stride_tricks import sliding_window_view
 from pydub import AudioSegment
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -55,10 +58,12 @@ from app.config import (
     STREAMING_DC_PAD_TOKENS,
     STREAMING_SECONDS_QUANTUM,
     BUNDLED_VOICE_PATH,
+    TTS_MODEL,
     VOICE_AUDIO_EXTENSIONS,
     ServerConfig,
     normalize_language,
 )
+from app.flash import EngineBusy, UnsupportedOption
 from app.priority_gate import get_gate
 from app.logging_utils import get_logger
 from app.model.text_vocab import clean_text, strip_markup, strip_separators
@@ -68,7 +73,7 @@ from app.text import (
     sanitize_text_for_tts,
     split_long_text,
 )
-from app.utils import VoicePromptError
+from app.voice_catalog import VoicePromptError
 
 logger = get_logger("api")
 
@@ -78,14 +83,25 @@ except PackageNotFoundError:
     API_VERSION = "1.0.0"
 
 
+def _flash() -> bool:
+    """TTS_MODEL=flash: the server runs TontaubeV1.1 Flash (app/flash.py) instead of TontaubeV1.1."""
+    return TTS_MODEL == "flash"
+
+
 async def _get_engine():
-    from app.inference import get_engine
+    if _flash():
+        from app.flash import get_engine
+    else:
+        from app.inference import get_engine
 
     return await get_engine()
 
 
 def _unload_engine() -> None:
-    from app.inference import unload_engine
+    if _flash():
+        from app.flash import unload_engine
+    else:
+        from app.inference import unload_engine
 
     unload_engine()
 
@@ -119,6 +135,7 @@ def _trim_boundary_silence(
     silence_threshold_dbfs: float = -50.0,
     headroom_db: float = 0.0,
     lead_padding_ms: int | None = None,
+    sample_rate: int = DUALCODEC_SAMPLE_RATE,
 ):
     """Trim excess edge silence while preserving all internal pauses.
 
@@ -129,7 +146,7 @@ def _trim_boundary_silence(
     """
     bounds = _trim_bounds(
         audio, padding_ms=padding_ms, silence_threshold_dbfs=silence_threshold_dbfs,
-        headroom_db=headroom_db, lead_padding_ms=lead_padding_ms,
+        headroom_db=headroom_db, lead_padding_ms=lead_padding_ms, sample_rate=sample_rate,
     )
     return audio if bounds is None else audio[..., bounds[0]:bounds[1]]
 
@@ -141,34 +158,45 @@ def _trim_bounds(
     silence_threshold_dbfs: float = -50.0,
     headroom_db: float = 0.0,
     lead_padding_ms: int | None = None,
+    sample_rate: int = DUALCODEC_SAMPLE_RATE,
 ) -> tuple[int, int] | None:
-    """_trim_boundary_silence's kept samples [start, end), or None (audio unchanged)."""
+    """_trim_boundary_silence's kept samples [start, end), or None (audio unchanged). audio: a torch tensor or a
+    numpy array (TontaubeV1.1 Flash)."""
     if padding_ms < 0 or audio.shape[-1] == 0:
         return None
 
-    samples = audio.detach().float().reshape(-1, audio.shape[-1])
-    mono_power = samples.square().mean(dim=0)
-    frame_samples = max(1, round(DUALCODEC_SAMPLE_RATE * 0.02))
-    hop_samples = max(1, round(DUALCODEC_SAMPLE_RATE * 0.01))
-    if mono_power.numel() < frame_samples:
+    if isinstance(audio, np.ndarray):
+        mono_power = np.square(audio.reshape(-1, audio.shape[-1]), dtype=np.float32).mean(axis=0)
+    else:
+        mono_power = audio.detach().float().reshape(-1, audio.shape[-1]).square().mean(dim=0)
+    frame_samples = max(1, round(sample_rate * 0.02))
+    hop_samples = max(1, round(sample_rate * 0.01))
+    if len(mono_power) < frame_samples:
         return None
 
-    frame_rms = mono_power.unfold(0, frame_samples, hop_samples).mean(dim=-1).sqrt()
     threshold = 10.0 ** ((silence_threshold_dbfs - headroom_db) / 20.0)
-    active_frames = (frame_rms >= threshold).nonzero(as_tuple=False).flatten()
-    if active_frames.numel() == 0:
+    if isinstance(mono_power, np.ndarray):
+        frame_rms = np.sqrt(sliding_window_view(mono_power, frame_samples)[::hop_samples].mean(axis=-1))
+        active = frame_rms >= threshold
+        loud_tail = lambda covered: np.sqrt(mono_power[covered:].mean()) >= threshold  # noqa: E731
+    else:
+        frame_rms = mono_power.unfold(0, frame_samples, hop_samples).mean(dim=-1).sqrt()
+        active = (frame_rms >= threshold).cpu().numpy()
+        loud_tail = lambda covered: bool(mono_power[covered:].mean().sqrt() >= threshold)  # noqa: E731
+    active_frames = np.flatnonzero(active)
+    if len(active_frames) == 0:
         return None
 
-    padding_samples = round(DUALCODEC_SAMPLE_RATE * padding_ms / 1000)
+    padding_samples = round(sample_rate * padding_ms / 1000)
     # Retain the entire active frames, including at zero requested padding.
     # Frame centers would otherwise cut into the start and end of speech.
-    first_sample = int(active_frames[0].item()) * hop_samples
-    last_sample = int(active_frames[-1].item()) * hop_samples + frame_samples
+    first_sample = int(active_frames[0]) * hop_samples
+    last_sample = int(active_frames[-1]) * hop_samples + frame_samples
     # unfold omits a partial final hop; retain it if it contains signal.
     covered = (len(frame_rms) - 1) * hop_samples + frame_samples
-    if covered < mono_power.numel() and mono_power[covered:].mean().sqrt() >= threshold:
-        last_sample = mono_power.numel()
-    lead_samples = padding_samples if lead_padding_ms is None else round(DUALCODEC_SAMPLE_RATE * max(0, lead_padding_ms) / 1000)
+    if covered < len(mono_power) and loud_tail(covered):
+        last_sample = len(mono_power)
+    lead_samples = padding_samples if lead_padding_ms is None else round(sample_rate * max(0, lead_padding_ms) / 1000)
     start = max(0, first_sample - lead_samples)
     end = min(audio.shape[-1], last_sample + padding_samples)
     return start, end
@@ -183,7 +211,7 @@ def _encode_audio(
     wav_buffer = io.BytesIO()
     sf.write(
         wav_buffer,
-        audio.cpu().squeeze(0).numpy().T,
+        audio.T if isinstance(audio, np.ndarray) else audio.cpu().squeeze(0).numpy().T,
         sample_rate,
         format="WAV",
     )
@@ -621,6 +649,34 @@ def _require_timestamps(req: TTSRequest, engine) -> None:
         raise TTSRequestOptionError("timestamps are not available on this server", code="timestamps_unavailable")
 
 
+# The request fields TontaubeV1.1 Flash reads; it refuses the others (voices, styles, sliders, timestamps, prefixes,
+# token and sampling controls of TontaubeV1.1).
+FLASH_FIELDS = frozenset({
+    "text", "temperature", "seed", "format", "bitrate", "priority", "trim_silence_padding_ms",
+    "use_verbalization", "language",
+})
+
+
+def _flash_option_error(req: TTSRequest) -> str | None:
+    # Flash has no MossFormer2 step; an explicit false is accepted for clients that always send the field.
+    unsupported = sorted(
+        f for f in req.model_fields_set - FLASH_FIELDS
+        if not (f == "mossformer2_postprocess" and not req.mossformer2_postprocess)
+    )
+    if unsupported:
+        return f"TontaubeV1.1 Flash does not support {', '.join(unsupported)}"
+    if req.language != "english":
+        return "TontaubeV1.1 Flash speaks English only"
+    return None
+
+
+def _flash_kwargs(req: TTSRequest) -> dict:
+    """FlashEngine.generate / generate_streaming arguments. Flash reads the raw text with its own rule verbalizer
+    and chunker (on unless the request sets use_verbalization=false), not TontaubeV1.1's text preparation."""
+    verbalize = req.use_verbalization if "use_verbalization" in req.model_fields_set else True
+    return {"seed": req.seed, "temperature": req.temperature, "verbalize": verbalize, "priority": req.priority}
+
+
 def _scaled_chars(limit: int, scale: float) -> int:
     return max(1, round(limit * scale))
 
@@ -759,8 +815,30 @@ async def synthesize(req: TTSRequest) -> dict:
     return await _synthesize(req)
 
 
+async def _synthesize_flash(req: TTSRequest, engine) -> dict:
+    """/predict with TontaubeV1.1 Flash: edge trim and encoding as for TontaubeV1.1, on the audio as the engine makes
+    it."""
+    error = _flash_option_error(req)
+    if error:
+        raise TTSRequestOptionError(error)
+    audio = await engine.generate(text=req.text, **_flash_kwargs(req))
+    if not len(audio):
+        raise TTSRequestOptionError("text contains nothing to speak")
+    sample_rate = engine.sample_rate
+    if req.trim_silence_padding_ms is not None:
+        audio = _trim_boundary_silence(audio, padding_ms=req.trim_silence_padding_ms, sample_rate=sample_rate)
+    audio_bytes, mime_type = _encode_audio(audio, req.format, req.bitrate, sample_rate=sample_rate)
+    return TTSResponse(
+        audio_b64=base64.b64encode(audio_bytes).decode("ascii"),
+        mime_type=mime_type,
+        sample_rate=sample_rate,
+    ).model_dump()
+
+
 async def _synthesize(req: TTSRequest) -> dict:
     engine = await _get_engine()
+    if _flash():
+        return await _synthesize_flash(req, engine)
     _require_verbalizer(req, engine)
     _require_vibevoice(req, engine)
     _require_timestamps(req, engine)
@@ -891,6 +969,197 @@ async def _synthesize(req: TTSRequest) -> dict:
     ).model_dump()
 
 
+# --- OpenAI-compatible speech route (/v1/audio/speech) ---
+OPENAI_MEDIA_TYPES = {
+    "mp3": "audio/mpeg", "opus": "audio/ogg", "aac": "audio/aac", "flac": "audio/flac", "wav": "audio/wav",
+    "pcm": "audio/pcm",
+}
+OPENAI_PCM_RATE = 24000
+
+
+class OpenAISpeechRequest(BaseModel):
+    """The body of OpenAI's POST /v1/audio/speech."""
+
+    model: str
+    input: str
+    voice: str | None = None
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
+    speed: float | None = None
+    instructions: str | None = None
+    stream_format: str | None = None
+
+    @field_validator("input")
+    @classmethod
+    def input_like_predict(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("input must not be empty")
+        if len(value) > MAX_REQUEST_TEXT_CHARS:
+            raise ValueError(f"input must contain at most {MAX_REQUEST_TEXT_CHARS} characters")
+        return value
+
+
+def _openai_error_body(message: str, status_code: int = 400) -> dict:
+    kind = "invalid_request_error" if status_code < 500 else "server_error"
+    return {"error": {"message": str(message), "type": kind, "code": None}}
+
+
+def _validation_message(exc: Exception) -> str:
+    errors = getattr(exc, "errors", None)
+    if errors is None:
+        return "request body must be JSON"
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or 'body'}: {error['msg'].removeprefix('Value error, ')}"
+        for error in errors()
+    )
+
+
+def _openai_voice_path(voice: str | None) -> str | None:
+    """The VOICE_PATH voice named `voice` (case-insensitive), or None for the default voice."""
+    if not voice:
+        return None
+    from app.voice_catalog import available_voice_files
+
+    root = Path(os.getenv("VOICE_PATH", str(BUNDLED_VOICE_PATH))).expanduser().resolve()
+    wanted = voice.strip().casefold()
+    return next((str(path) for path, _ in available_voice_files(root) if path.stem.casefold() == wanted), None)
+
+
+def _ffmpeg_found() -> bool:
+    import shutil
+
+    return shutil.which(AudioSegment.converter) is not None
+
+
+def _float_samples(audio) -> np.ndarray:
+    if isinstance(audio, np.ndarray):
+        return audio.reshape(-1).astype(np.float32, copy=False)
+    return audio.squeeze().cpu().float().numpy().reshape(-1)
+
+
+class _PcmWriter:
+    """OpenAI's pcm: 16-bit little-endian mono at 24 kHz. A 48 kHz engine's audio goes through a Kaiser-windowed
+    sinc low-pass (11 kHz, about 86 dB stopband from 12 kHz) and keeps every second sample."""
+
+    def __init__(self, sample_rate: int):
+        from app.stream_writers import pcm16
+
+        if sample_rate % OPENAI_PCM_RATE:
+            raise ValueError(f"cannot make 24 kHz pcm from {sample_rate} Hz")
+        self._pcm16, self._step, self._in, self._out = pcm16, sample_rate // OPENAI_PCM_RATE, 0, 0
+        n = 80 * self._step + 1
+        t = np.arange(n) - n // 2
+        cutoff = 11000 / sample_rate
+        taps = 2 * cutoff * np.sinc(2 * cutoff * t) * np.kaiser(n, 8.6)
+        self._taps = taps / taps.sum()
+        self._buf = np.zeros(n // 2)        # output k is centred on input sample k * step
+
+    def _decimate(self, samples: np.ndarray) -> np.ndarray:
+        if self._step == 1:
+            return samples
+        self._buf = np.concatenate([self._buf, samples])
+        n = len(self._taps)
+        count = (len(self._buf) - n) // self._step + 1 if len(self._buf) >= n else 0
+        if count == 0:
+            return np.zeros(0)
+        out = sliding_window_view(self._buf, n)[: count * self._step: self._step] @ self._taps
+        self._buf = self._buf[count * self._step:]
+        return out
+
+    def write_chunk(self, audio) -> bytes:
+        samples = _float_samples(audio)
+        self._in += len(samples)
+        out = self._decimate(samples)
+        self._out += len(out)
+        return self._pcm16(out).astype("<i2").tobytes()
+
+    def close(self) -> bytes:
+        if self._step == 1:
+            return b""
+        out = self._decimate(np.zeros(len(self._taps)))[: -(-self._in // self._step) - self._out]
+        self._out += len(out)
+        return self._pcm16(out).astype("<i2").tobytes()
+
+
+def _ogg_crc_table() -> list[int]:
+    table = []
+    for byte in range(256):
+        crc = byte << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04C11DB7 if crc & 0x80000000 else crc << 1) & 0xFFFFFFFF
+        table.append(crc)
+    return table
+
+
+_OGG_CRC = _ogg_crc_table()
+
+
+class _OggOpusWriter:
+    """Ogg Opus (RFC 7845), streamable: 20 ms Opus packets, one or more pages per chunk. The last page's granule
+    position ends the stream on the last real sample."""
+
+    def __init__(self, sample_rate: int, bitrate: int):
+        import struct
+
+        import opuslib
+
+        from app.stream_writers import pcm16
+
+        self._struct, self._pcm16 = struct, pcm16
+        self._encoder = opuslib.Encoder(sample_rate, 1, opuslib.APPLICATION_AUDIO)
+        self._encoder.bitrate = bitrate
+        self._frame, self._scale = sample_rate // 50, 48000 // sample_rate
+        self._lookahead = self._encoder.lookahead
+        self._rest = np.zeros(0, np.int16)
+        self._serial, self._seq, self._granule, self._samples, self._encoded = secrets.randbits(32), 0, 0, 0, 0
+        head = b"OpusHead" + struct.pack("<BBHIhB", 1, 1, self._lookahead * self._scale, sample_rate, 0, 0)
+        vendor = b"Tontaube"
+        tags = b"OpusTags" + struct.pack("<I", len(vendor)) + vendor + struct.pack("<I", 0)
+        self._header = self._page([head], 0, 0x02) + self._page([tags], 0, 0)
+
+    def _page(self, packets: list[bytes], granule: int, flags: int) -> bytes:
+        lacing = b"".join(bytes([255] * (len(p) // 255) + [len(p) % 255]) for p in packets)
+        page = bytearray(self._struct.pack("<4sBBqIIIB", b"OggS", 0, flags, granule, self._serial, self._seq, 0,
+                                           len(lacing)) + lacing + b"".join(packets))
+        self._seq += 1
+        crc = 0
+        for byte in page:
+            crc = ((crc << 8) & 0xFFFFFFFF) ^ _OGG_CRC[(crc >> 24) ^ byte]
+        page[22:26] = self._struct.pack("<I", crc)
+        return bytes(page)
+
+    def _pages(self, pcm: np.ndarray, last: bool = False) -> bytes:
+        header, self._header = self._header, b""
+        fs = self._frame
+        packets = [self._encoder.encode(pcm[i:i + fs].tobytes(), fs) for i in range(0, len(pcm) - fs + 1, fs)]
+        self._encoded += len(packets) * fs
+        pages, group, segments = [header], [], 0
+        for index, packet in enumerate(packets):
+            group.append(packet)
+            segments += len(packet) // 255 + 1
+            self._granule += fs * self._scale
+            final = last and index == len(packets) - 1
+            if final or index == len(packets) - 1 or segments > 200:
+                granule = (self._lookahead + self._samples) * self._scale if final else self._granule
+                pages.append(self._page(group, granule, 0x04 if final else 0))
+                group, segments = [], 0
+        return b"".join(pages)
+
+    def write_chunk(self, audio) -> bytes:
+        pcm = self._pcm16(audio)
+        self._samples += len(pcm)
+        pcm = np.concatenate([self._rest, pcm])
+        whole = len(pcm) // self._frame * self._frame
+        self._rest = pcm[whole:]
+        return self._pages(pcm[:whole])
+
+    def close(self) -> bytes:
+        """The rest, zero-padded past the encoder's lookahead so that every real sample is decoded."""
+        needed = self._samples + self._lookahead - self._encoded
+        pcm = np.zeros(-(-needed // self._frame) * self._frame, np.int16)
+        pcm[:len(self._rest)] = self._rest
+        return self._pages(pcm, last=True)
+
+
 def create_app():
     import asyncio as _asyncio
 
@@ -899,13 +1168,13 @@ def create_app():
     from fastapi.responses import JSONResponse, StreamingResponse
     from fastapi import status
     from app.config import CORS_ALLOWED_ORIGINS, REQUIRE_API_KEY, TTS_API_KEY
-    from app.opus_stream import OpusStreamEncoder as _OpusStreamEncoder
     from app.stream_writers import Mp3StreamWriter
 
     _enable_streaming = os.getenv("ENABLE_STREAMING", "1") == "1"
     _engine_ready = _asyncio.Event()
     _server_config = ServerConfig()
-    _request_slots = _asyncio.BoundedSemaphore(_server_config.max_inflight_requests)
+    # TontaubeV1.1 Flash queues requests for its engines itself (app/flash.py).
+    _request_slots = contextlib.nullcontext() if _flash() else _asyncio.BoundedSemaphore(_server_config.max_inflight_requests)
     _stream_calibration: dict = {"value": None, "warned": False}   # StreamCalibration once measured (lifespan)
 
     async def _calibrate_streaming(engine):
@@ -989,10 +1258,11 @@ def create_app():
         if REQUIRE_API_KEY and not TTS_API_KEY:
             raise RuntimeError("TTS_API_KEY is required when REQUIRE_API_KEY=1")
         engine = await _get_engine()
-        logger.info(
-            "End-to-end request concurrency limited to %d",
-            _server_config.max_inflight_requests,
-        )
+        if not _flash():
+            logger.info(
+                "End-to-end request concurrency limited to %d",
+                _server_config.max_inflight_requests,
+            )
         if _enable_streaming and STREAM_CALIBRATION and getattr(engine, "vv_tokenizer", None) is not None:
             _stream_calibration["value"] = await _calibrate_streaming(engine)
         _engine_ready.set()
@@ -1009,6 +1279,14 @@ def create_app():
             content=_error_body(str(exc), getattr(exc, "code", None)),
             status_code=422,
         )
+
+    @app.exception_handler(EngineBusy)
+    async def engine_busy(_request: Request, exc: EngineBusy):
+        return JSONResponse(content=_error_body(str(exc), "engine_busy"), status_code=503)
+
+    @app.exception_handler(UnsupportedOption)
+    async def unsupported_option(_request: Request, exc: UnsupportedOption):
+        return JSONResponse(content=_error_body(str(exc)), status_code=422)
 
     @app.exception_handler(VoicePromptError)
     async def voice_prompt_error(_request: Request, exc: VoicePromptError):
@@ -1040,9 +1318,12 @@ def create_app():
 
     @app.get("/controls")
     async def controls_catalog():
-        """Style sliders of the loaded model, for the `controls` / `segment_controls` request fields."""
+        """Style sliders of the loaded model, for the `controls` / `segment_controls` request fields. A model
+        that reads only some request fields (TontaubeV1.1 Flash) also lists those as `fields`, with its name."""
         if not _engine_ready.is_set():
             return JSONResponse(content={"error": "Model still loading"}, status_code=503)
+        if _flash():
+            return {"controls": [], "model": "TontaubeV1.1 Flash", "fields": sorted(FLASH_FIELDS - {"language"})}
         engine = await _get_engine()
         catalog = engine.controls.catalog() if engine.controls is not None else []
         return {"controls": catalog}
@@ -1057,7 +1338,14 @@ def create_app():
     async def tts_api_key_guard(request: Request, call_next):
         if REQUIRE_API_KEY and request.method != "OPTIONS":
             open_paths = {"/", "/api", "/healthz", "/readyz"}
-            if request.url.path not in open_paths:
+            if request.url.path.startswith("/v1/"):
+                # OpenAI clients send the key as a bearer token.
+                scheme, _, token = request.headers.get("authorization", "").partition(" ")
+                keys = [request.headers.get("x-api-key"), token.strip() if scheme.lower() == "bearer" else None]
+                if not any(key and secrets.compare_digest(key.encode(), TTS_API_KEY.encode()) for key in keys):
+                    return JSONResponse(content=_openai_error_body("unauthorized", 401),
+                                        status_code=status.HTTP_401_UNAUTHORIZED)
+            elif request.url.path not in open_paths:
                 provided_key = request.headers.get("x-api-key")
                 if not provided_key or not secrets.compare_digest(provided_key, TTS_API_KEY):
                     return JSONResponse(
@@ -1101,6 +1389,17 @@ def create_app():
         )
         _require_controls(req, engine, text, segment_controls)
         return text, preprocessor, segment_controls
+
+    def _stream_option_error(req: TTSRequest, transport: Literal["mp3", "opus"]) -> str | None:
+        return (_flash_option_error(req) if _flash() else None) or _streaming_option_error(req, transport)
+
+    def _stream_inputs(req: TTSRequest, engine) -> tuple:
+        """(text, generate_streaming keyword arguments) of a stream request."""
+        if _flash():
+            return req.text, _flash_kwargs(req)
+        text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
+        initial_seconds = _initial_seconds(req, engine, text)
+        return text, _streaming_kwargs(req, preprocessor, segment_controls, initial_seconds)
 
     def _streaming_kwargs(req: TTSRequest, preprocessor, segment_controls=None, initial_seconds=None) -> dict:
         if initial_seconds is None:
@@ -1150,6 +1449,9 @@ def create_app():
     async def encode_voice(req: EncodeVoiceRequest):
         if not _engine_ready.is_set():
             return JSONResponse(content={"error": "Model still loading"}, status_code=503)
+        if _flash():
+            return JSONResponse(content=_error_body("TontaubeV1.1 Flash has one voice and takes no voice tokens"),
+                                status_code=422)
         async with _request_slots:
             engine = await _get_engine()
             started = time.perf_counter()
@@ -1173,8 +1475,8 @@ def create_app():
 
     # --- Streaming routes ---
     if _enable_streaming:
-        async def _audio_sse_generator(engine, text, writer, label="STREAM", priority_high: bool = False, **gen_kwargs):
-            """Shared SSE audio streaming generator.
+        async def _audio_sse_generator(pieces, writer, label="STREAM", priority_high: bool = False):
+            """Shared SSE audio streaming generator over the engine's audio pieces.
 
             Yields SSE `data:` lines with base64-encoded audio chunks. When
             `priority_high` is true, generation runs inside the priority gate's
@@ -1188,7 +1490,7 @@ def create_app():
                     chunk_idx = 0
                     t_stream_start = time.monotonic()
                     try:
-                        async for audio_chunk in engine.generate_streaming(text=text, **gen_kwargs):
+                        async for audio_chunk in pieces:
                             t0 = time.monotonic()
                             encoded_bytes = writer.write_chunk(audio_chunk)
                             t1 = time.monotonic()
@@ -1231,28 +1533,25 @@ def create_app():
 
         async def _stream_response(req: TTSRequest):
             """Build an MP3 SSE response, honoring bitrate and request priority."""
-            option_error = _streaming_option_error(req, "mp3")
+            option_error = _stream_option_error(req, "mp3")
             if option_error:
                 return JSONResponse(content=_error_body(option_error), status_code=422)
             engine = await _get_engine()
-            if engine.vv_tokenizer is None:
+            if not engine.can_stream:
                 return JSONResponse(
                     content={"error": "streaming is unavailable because VibeVoice is not loaded"},
                     status_code=503,
                 )
-            text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
-            initial_seconds = _initial_seconds(req, engine, text)
+            text, gen_kwargs = _stream_inputs(req, engine)
+            # TontaubeV1.1 starts generating on the first read; Flash takes the request here (or refuses: 503).
+            pieces = engine.generate_streaming(text=text, **gen_kwargs)
             writer = Mp3StreamWriter(
-                DUALCODEC_SAMPLE_RATE,
+                getattr(engine, "sample_rate", DUALCODEC_SAMPLE_RATE),
                 bitrate=_bitrate_number(req.bitrate, bits_per_second=False),
             )
 
             return StreamingResponse(
-                _audio_sse_generator(
-                    engine, text, writer,
-                    priority_high=req.priority == "high",
-                    **_streaming_kwargs(req, preprocessor, segment_controls, initial_seconds),
-                ),
+                _audio_sse_generator(pieces, writer, priority_high=req.priority == "high"),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -1287,22 +1586,34 @@ def create_app():
             try:
                 payload = await ws.receive_json()
                 req = TTSRequest.model_validate(payload)
-                option_error = _streaming_option_error(req, "opus")
+                option_error = _stream_option_error(req, "opus")
                 if option_error:
                     await ws.send_json(_error_body(option_error))
                     await ws.close(code=1008)
                     return
+                try:  # opuslib needs the Opus library (libopus), which Windows and macOS do not have by default
+                    from app.opus_stream import OpusStreamEncoder as _OpusStreamEncoder
+                except Exception as exc:  # noqa: BLE001
+                    await ws.send_json(_error_body(f"Opus streaming is unavailable on this server: {exc}"))
+                    await ws.close(code=1011)
+                    return
                 engine = await _get_engine()
-                if engine.vv_tokenizer is None:
+                if not engine.can_stream:
                     await ws.send_json({
                         "error": "streaming is unavailable because VibeVoice is not loaded"
                     })
                     await ws.close(code=1013)
                     return
-                text, preprocessor, segment_controls = _prepare_streaming_request(req, engine)
-                initial_seconds = _initial_seconds(req, engine, text)
+                text, gen_kwargs = _stream_inputs(req, engine)
+                try:
+                    pieces = engine.generate_streaming(text=text, **gen_kwargs)
+                except (EngineBusy, UnsupportedOption) as exc:
+                    busy = isinstance(exc, EngineBusy)
+                    await ws.send_json(_error_body(str(exc), "engine_busy" if busy else None))
+                    await ws.close(code=1013 if busy else 1008)
+                    return
                 opus_enc = _OpusStreamEncoder(
-                    DUALCODEC_SAMPLE_RATE,
+                    getattr(engine, "sample_rate", DUALCODEC_SAMPLE_RATE),
                     bitrate=_bitrate_number(req.bitrate, bits_per_second=True),
                 )
                 async with _request_slots:
@@ -1310,11 +1621,11 @@ def create_app():
                     if gate_ctx is not None:
                         await gate_ctx.__aenter__()
                     try:
-                        async for audio_chunk in engine.generate_streaming(
-                            text=text,
-                            **_streaming_kwargs(req, preprocessor, segment_controls, initial_seconds),
-                        ):
+                        async for audio_chunk in pieces:
                             await ws.send_bytes(opus_enc.encode(audio_chunk))
+                        tail = opus_enc.flush()
+                        if tail:
+                            await ws.send_bytes(tail)
                         await ws.send_json({"done": True})
                     finally:
                         if gate_ctx is not None:
@@ -1327,6 +1638,104 @@ def create_app():
                     await ws.send_json({"error": "streaming generation failed"})
                 except Exception:
                     pass
+
+        # --- OpenAI-compatible routes ---
+        def _openai_error(message: str, status_code: int) -> JSONResponse:
+            return JSONResponse(content=_openai_error_body(message, status_code), status_code=status_code)
+
+        @app.get("/v1/models", description="OpenAI-compatible model list: the served model.")
+        async def openai_models():
+            name = "TontaubeV1.1 Flash" if _flash() else MODEL_VERSION
+            return {"object": "list", "data": [{"id": name, "object": "model", "owned_by": "tontaube"}]}
+
+        @app.post(
+            "/v1/audio/speech",
+            description=(
+                "OpenAI-compatible speech (POST /v1/audio/speech). mp3, opus and pcm stream as they are made; "
+                "wav, aac and flac come whole."
+            ),
+            openapi_extra={"requestBody": {"required": True, "content": {
+                "application/json": {"schema": OpenAISpeechRequest.model_json_schema()}}}},
+        )
+        async def openai_speech(request: Request):
+            from fastapi.responses import Response
+
+            if not _engine_ready.is_set():
+                return _openai_error("Model still loading", 503)
+            try:
+                body = OpenAISpeechRequest.model_validate(await request.json())
+            except ValueError as exc:
+                return _openai_error(_validation_message(exc), 400)
+            if body.speed is not None and body.speed != 1.0:
+                return _openai_error("speed is not supported", 400)
+            if body.stream_format not in (None, "audio"):
+                return _openai_error(f"stream_format {body.stream_format!r} is not supported; use 'audio'", 400)
+            fmt = body.response_format
+            if fmt in ("aac", "flac") and not _ffmpeg_found():
+                return _openai_error(f"response_format {fmt!r} needs FFmpeg, which this server does not find; "
+                                     "use mp3, opus, wav or pcm", 400)
+            if fmt == "opus":
+                try:
+                    import opuslib  # noqa: F401
+                except Exception:  # noqa: BLE001
+                    return _openai_error("response_format 'opus' needs the Opus library (libopus), which this "
+                                         "server does not have; use mp3, wav or pcm", 400)
+            engine = await _get_engine()
+            if not engine.can_stream:
+                return _openai_error("speech is unavailable because VibeVoice is not loaded", 503)
+            voice_path = None if _flash() else _openai_voice_path(body.voice)
+            try:
+                req = TTSRequest(text=body.input, **({"voice_path": voice_path} if voice_path else {}))
+                text, gen_kwargs = _stream_inputs(req, engine)
+                # The same generation as /stream: Flash's redraws are settled before audio is handed out.
+                pieces = engine.generate_streaming(text=text, **gen_kwargs)
+            except EngineBusy as exc:
+                return _openai_error(str(exc), 503)
+            except (TTSRequestOptionError, UnsupportedOption, VoicePromptError) as exc:
+                return _openai_error(str(exc), 400)
+            sample_rate = getattr(engine, "sample_rate", DUALCODEC_SAMPLE_RATE)
+
+            if fmt in ("wav", "aac", "flac"):
+                from app.stream_writers import pcm16
+
+                async with _request_slots:
+                    try:
+                        audio = [pcm16(piece) async for piece in pieces]
+                    except Exception:
+                        logger.exception("OpenAI speech request failed")
+                        return _openai_error("speech generation failed", 500)
+                audio = np.concatenate(audio) if audio else np.zeros(0, np.int16)
+                if not len(audio):
+                    return _openai_error("input contains nothing to speak", 400)
+                encoded, _ = await _asyncio.to_thread(
+                    _encode_audio, audio, "adts" if fmt == "aac" else fmt, "64k", sample_rate,
+                )
+                return Response(content=encoded, media_type=OPENAI_MEDIA_TYPES[fmt])
+
+            if fmt == "mp3":
+                writer = Mp3StreamWriter(sample_rate, bitrate=64)
+            elif fmt == "opus":
+                writer = _OggOpusWriter(sample_rate, bitrate=64000)
+            else:
+                writer = _PcmWriter(sample_rate)
+
+            async def audio_bytes():
+                async with _request_slots:
+                    try:
+                        async for piece in pieces:
+                            data = writer.write_chunk(piece)
+                            if data:
+                                yield bytes(data)
+                        tail = writer.close()
+                        if tail:
+                            yield bytes(tail)
+                    except Exception:
+                        # Headers are out: end the response without its last chunk, so the client sees an error.
+                        logger.exception("OpenAI speech stream failed")
+                        raise
+
+            return StreamingResponse(audio_bytes(), media_type=OPENAI_MEDIA_TYPES[fmt],
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return app
 

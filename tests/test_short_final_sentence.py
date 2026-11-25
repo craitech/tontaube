@@ -565,6 +565,7 @@ class _Captured(Exception):
 
 class _FakeEngine:
     vv_tokenizer = object()
+    can_stream = True
     verbalizer = None
 
     def __init__(self):

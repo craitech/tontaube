@@ -33,9 +33,15 @@ TTS_BACKEND = os.getenv("TTS_BACKEND", "lite").strip().lower()
 if TTS_BACKEND not in ("vllm", "lite"):
     raise ValueError(f"unsupported TTS_BACKEND {TTS_BACKEND!r}; expected 'vllm' or 'lite'")
 
+# "v1.1" (default): TontaubeV1.1 on the backend above. "flash": TontaubeV1.1 Flash, one English voice, on the GPU or
+# the CPU (LITE_DEVICE); see app/flash.py.
+TTS_MODEL = os.getenv("TTS_MODEL", "v1.1").strip().lower()
+if TTS_MODEL not in ("v1.1", "flash"):
+    raise ValueError(f"unsupported TTS_MODEL {TTS_MODEL!r}; expected 'v1.1' or 'flash'")
+
 
 def _lite_on_cpu() -> bool:
-    if TTS_BACKEND != "lite":
+    if TTS_BACKEND != "lite" and TTS_MODEL != "flash":
         return False
     device = os.getenv("LITE_DEVICE", "").strip().lower()
     if device:

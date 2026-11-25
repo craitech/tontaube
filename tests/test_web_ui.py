@@ -293,3 +293,15 @@ def test_unset_slider_rests_at_the_catalog_default_step():
     assert "defaultStep: Number.isInteger(c.default)" in script
     resting = script.split("function sliderRestingStep", 1)[1].split("}", 1)[0]
     assert "control.defaultStep" in resting
+
+
+def test_inputs_of_fields_the_server_does_not_read_are_disabled_and_not_sent():
+    """GET /controls of a TontaubeV1.1 Flash server lists the request fields it reads (`fields`)."""
+    script = _ui_text("app.js")
+    assert "setServerFields(body.fields, body.model);" in script
+    assert "if (!supported(field)) delete payload[field];" in script
+    assert "if (supported(\"voice_audio_b64\")) {" in script          # no voice needed for a one-voice model
+    page = _ui_text("index.html")
+    for ids in re.findall(r'\["([a-z-]+(?:", "[a-z-]+)*)"\]', script.split("const fieldInputs = {")[1].split("};")[0]):
+        for element in ids.split('", "'):
+            assert f'id="{element}"' in page, element

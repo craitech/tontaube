@@ -1,7 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "TontaubeV1.1 Flash",
-  "short_name": "Tontaube Flash",
+  "name": "Tontaube Reader",
   "version": "1.2.0",
   "description": "Reads web pages and selected text aloud with a natural English voice. Runs on your computer, so your text stays private.",
   "minimum_chrome_version": "116",
@@ -13,7 +12,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Read aloud",
+    "default_title": "Tontaube Reader",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"

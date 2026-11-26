@@ -85,11 +85,12 @@ python3 -c 'import base64,json,sys; print(json.dumps({"text":"This voice was clo
 > cloned.wav
 ```
 
-English text verbalization is optional and disabled by default. To load it,
-start the server with `ENABLE_VERBALIZATION=1`; requests that should use it must
-also send `"use_verbalization": true`. The verbalizer uses about 2.5 GiB of
-additional GPU memory, so leave it disabled when written and spoken forms are
-already identical.
+English text verbalization (digits, dates, times, money, units and abbreviations
+read as words) is chosen per request with `"verbalizer"`: `"rules"` (the rule
+verbalizer of Flash), `"contextual"` (the model verbalizer, which needs the
+server started with `ENABLE_VERBALIZATION=1` and about 2.5 GiB of additional GPU
+memory) or `"off"`. TontaubeV1.1 defaults to `"off"`, Flash to `"rules"`. See
+[Verbalization](#verbalization).
 
 The verbalizer also runs on its own, without the speech models, for use with
 any text-to-speech system:
@@ -125,7 +126,7 @@ environment. A remote API must allow the UI's exact origin through
 `TTS_CORS_ORIGINS`.
 
 The UI supports bundled voice selection, local voice-reference uploads, style
-sliders, sampling and acoustic controls, WAV/MP3/Opus responses, MP3 streaming,
+sliders, sampling and acoustic controls, WAV/MP3/Opus responses, PCM, MP3 and Opus streaming,
 instant playback, and downloads. It reads its own `voices/` directory and
 uploads the selected audio file with each request, so a remote inference server
 does not need the sample files. References live together in `voices/samples/`;
@@ -318,7 +319,7 @@ see [flash/](flash/README.md#server).
 - `audiobook`, `conversational`, and `agentic` speaking styles
 - Five style sliders: speaking rate, pauses, intonation, pitch, and crisp articulation
 - Long-form generation with boundary-aware text and audio chunking
-- Low-latency MP3 and Opus streaming
+- Low-latency PCM, MP3 and Opus streaming
 - Character-level text tokenization and multilingual language conditioning
 - 4-bit weights for small GPUs and CPUs by default, or full precision on vLLM
 - Optional English text verbalization, disabled by default
@@ -550,6 +551,29 @@ Select a voice in the UI, or use `"voice_path": "samples/Marcus.mp3"` with
 the default bundled voice directory. Add your own audio files to
 `voices/samples/`; see [voice catalogue metadata](voices/README.md).
 
+### Verbalization
+
+`"verbalizer"` (on `/predict`, `/stream`, `/ws/stream` and `/v1/audio/speech`) chooses
+how the English text is turned into words before it is spoken:
+
+- `"rules"`: the rule verbalizer of Flash (numbers, dates, times, money, units,
+  abbreviations), also for TontaubeV1.1. It is Flash's own code (`flash/text`,
+  C++ called through `ctypes` by `flash.common.frontend`, built on first use if
+  the library is not prebuilt), shared by one instance in
+  `app/verbalize_rules.py`; a server without a compiler or the library answers
+  422.
+- `"contextual"`: the model verbalizer (`app/verbalizer.py`), which reads the text
+  in context. The server needs `ENABLE_VERBALIZATION=1`; without it 422.
+- `"off"`: the text as written.
+
+Omitted, the default is `"off"` on TontaubeV1.1 and `"rules"` on Flash. The legacy
+`"use_verbalization"` still works: `true` is `"contextual"` on TontaubeV1.1 and
+`"rules"` on Flash, `false` is `"off"`; sent together with `verbalizer`, the two
+must agree (422 otherwise). Every mode is English only (422 for another
+language), and `"contextual"` on Flash is refused (its server loads no model
+verbalizer). The streaming routes verbalize the first text segment before
+generation and each later one just in time, while the audio before it plays.
+
 ### Style sliders
 
 TontaubeV1.1 has five style sliders. Pass them as `controls`, one step per
@@ -587,14 +611,28 @@ and pause shortening. Ogg/Opus files always use a 48 kHz playback clock. The
 enhancer's approximately 420 MiB of weights are downloaded on first use; expect
 a slower first request.
 
-For server-sent MP3 chunks, send the request to `POST /stream`.
+For server-sent audio chunks, send the request to `POST /stream`. The default
+`format` is `"pcm16"` (before this release it was MP3): the events hold the
+decoded audio itself, raw signed 16-bit little-endian mono PCM at the engine's
+sample rate (base64 in `audio_b64`, whole samples per event, no codec delay;
+`bitrate` is ignored). That is 24 kHz for TontaubeV1.1 and 48 kHz for Flash
+(24 kHz when its server runs with `--rate 24000`), and every PCM event names it
+in `sample_rate`.
+`"format": "mp3"` sends MP3 chunks, which delay the sound by the codec's own delay
+(about 46 ms at 24 kHz, encoder 576 plus decoder 529 samples), and
+`"format": "opus"` sends the framed Opus of `/ws/stream` (a little-endian uint16
+frame count, then each 20 ms frame as a uint16 length and its bytes; `bitrate`
+applies; the server needs libopus, else the request gets a 422). This holds for
+TontaubeV1.1 and Flash alike. Each event is `{"index", "audio_b64", "done": false}`
+(PCM events also hold `"sample_rate"`) and the last is `{"done": true}`. A client that relied on MP3 must now send
+`"format": "mp3"`. `/predict` does not accept `pcm16`.
 `WS /ws/stream` returns framed Opus audio from the 24 kHz synthesis stream.
 Streaming does not apply pause shortening or MossFormer2; omit
 `mossformer2_postprocess` or set it to `false` for streaming. Streaming always
 uses VibeVoice. The `bitrate` and `priority` fields apply to every streaming
 route; `vllm_priority` is limited to non-streaming `/predict` calls. An explicit
-`format` must match the transport (`mp3` for SSE, `opus` for WebSocket), or it
-may be omitted. `max_new_tokens` is the total per-chunk CB0 budget, including
+`format` must match the transport (`pcm16`, `mp3` or `opus` for SSE, `opus` for WebSocket), or it
+may be omitted (`wav` is refused on `/stream`). `max_new_tokens` is the total per-chunk CB0 budget, including
 the initial silence token and any early streaming prefix, and accepts 50–400.
 `streaming_initial_seconds` controls the first buffered audio chunk. It accepts
 0.4–6.0 seconds in 0.4-second increments. Increasing it raises time to first
@@ -741,11 +779,12 @@ docker run --rm --gpus all --ipc=host \
   tontaube:1.2.0
 ```
 
-To enable the verbalizer, set `ENABLE_VERBALIZATION=1`. It must resolve and load
-successfully at startup, and individual requests must also set
-`"use_verbalization": true`. Such a request returns an explicit error when the
-verbalizer is unavailable or the requested language is not English. When
-verbalization is disabled, the model is not loaded.
+To enable the model verbalizer, set `ENABLE_VERBALIZATION=1`. It must resolve and
+load successfully at startup, and individual requests must also set
+`"verbalizer": "contextual"` (or the legacy `"use_verbalization": true`). Such a
+request returns an explicit error when the verbalizer is unavailable or the
+requested language is not English. When verbalization is disabled, the model is
+not loaded. The rule verbalizer needs no server setting.
 
 ## Lite backend
 

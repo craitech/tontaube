@@ -33,9 +33,11 @@ function requestHeaders() {
   return {"content-type": "application/json", ...apiKeyHeaders()};
 }
 
+let serverModel = "";   // GET /controls `model`: the name of the server's model, shown next to "Server ready"
+
 function setConnection(kind, label) {
   byId("connection-dot").className = `status-dot ${kind || ""}`;
-  byId("connection-label").textContent = label;
+  byId("connection-label").textContent = kind === "connected" && serverModel ? `${label} · ${serverModel}` : label;
 }
 
 function setStatus(kind, message) {
@@ -122,6 +124,7 @@ async function selectedVoiceBase64() {
 // with the model's name. The inputs of the other fields are disabled and not sent. null: every field (TontaubeV1.1).
 
 let serverFields = null;
+let serverDevice = "";   // GET /controls `device`: where the server's model runs ("GPU (<name>)", "CPU (<n> threads)")
 const fieldInputs = {
   language: ["language"], tag: ["tag"], prompt_max_tokens: ["prompt-max-tokens"],
   voice_audio_b64: ["voice-select", "refresh-voices", "voice-file"], voice_path: ["voice-path"],
@@ -143,6 +146,9 @@ function setServerFields(fields, model) {
     // Flash reads written text with its built-in verbalizer unless told not to; TontaubeV1.1's is optional.
     byId("use-verbalization").checked = limited;
     byId("verbalization-hint").textContent = limited ? "Built into this model" : "Requires the optional server model";
+    // Flash is a streaming model: start in stream mode there (the complete file stays selectable).
+    const mode = document.querySelector(`input[name="transport"][value="${limited ? "stream" : "batch"}"]`);
+    if (mode) mode.checked = true;
   }
   serverFields = limited ? fields : null;
   for (const [field, ids] of Object.entries(fieldInputs)) {
@@ -391,6 +397,8 @@ async function loadControls() {
     controlsRetryWanted = false;
     controlsRetries = 0;
     showCatalog(Array.isArray(body.controls) ? body.controls : []);
+    serverDevice = typeof body.device === "string" ? body.device : "";
+    serverModel = typeof body.model === "string" ? body.model : "";
     setServerFields(body.fields, body.model);
     setConnection("connected", "Server ready");
   } catch (error) {
@@ -488,9 +496,9 @@ async function buildPayload(streaming) {
   if (prefixTokens !== undefined) payload.prefix_tokens = prefixTokens;
 
   if (streaming) {
-    payload.format = "mp3";
+    payload.format = byId("format").value;   // pcm16 (default) or mp3
     payload.streaming_initial_seconds = optionalNumber("streaming-initial-seconds");
-    if (payload.vibevoice_postprocess === false) throw new Error("MP3 streaming requires VibeVoice processing.");
+    if (payload.vibevoice_postprocess === false) throw new Error("Streaming requires VibeVoice processing.");
   } else {
     payload.format = byId("format").value;
     const vllmPriority = optionalNumber("vllm-priority");
@@ -576,19 +584,88 @@ async function openMp3Playback() {
   };
 }
 
+// Raw PCM stream (format pcm16: int16 little-endian mono at the rate each event names in `sample_rate`): played
+// through Web Audio as it arrives.
+let stopLivePcm = null;   // stops the PCM stream that is still playing through Web Audio, if any
+let streamAbort = null;   // aborts the stream request in flight, if any
+
+function syncStop() {
+  byId("stop").hidden = !streamAbort && !stopLivePcm;
+}
+
+function openPcmPlayback() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  let ctx = null;   // made with the first chunk, at the stream's rate
+  let next = 0;
+  let last = null;
+  let complete = false;   // every chunk of the stream is queued
+  const stop = () => {    // also the natural end: the context is closed, so contexts do not pile up
+    if (stopLivePcm !== stop) return;
+    stopLivePcm = null;
+    if (ctx) ctx.close();
+    syncStop();
+  };
+  if (stopLivePcm) stopLivePcm();
+  stopLivePcm = stop;
+  result.hidden = false;
+  download.hidden = true;
+  byId("result-meta").textContent = "Waiting for the first audio chunk…";
+  return {
+    async append(bytes, rate) {
+      const n = Math.floor(bytes.byteLength / 2);
+      if (!n || stopLivePcm !== stop) return;   // stopped: the chunks still go into the saved file
+      if (!ctx) ctx = new Ctx({sampleRate: rate});
+      const view = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+      const buf = ctx.createBuffer(1, n, rate);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      next = Math.max(next, ctx.currentTime + 0.02);
+      src.start(next);
+      next += buf.duration;
+      last = src;
+      src.onended = () => { if (complete && src === last) stop(); };
+    },
+    close() {
+      complete = true;
+      if (!ctx || ctx.currentTime >= next) stop();
+    },
+  };
+}
+
+function pcmToWav(parts, rate) {
+  const size = parts.reduce((total, part) => total + part.byteLength, 0);
+  const header = new DataView(new ArrayBuffer(44));
+  const text = (offset, value) => { for (let i = 0; i < value.length; i++) header.setUint8(offset + i, value.charCodeAt(i)); };
+  text(0, "RIFF"); header.setUint32(4, 36 + size, true); text(8, "WAVE"); text(12, "fmt ");
+  header.setUint32(16, 16, true); header.setUint16(20, 1, true); header.setUint16(22, 1, true);
+  header.setUint32(24, rate, true); header.setUint32(28, rate * 2, true); header.setUint16(32, 2, true);
+  header.setUint16(34, 16, true); text(36, "data"); header.setUint32(40, size, true);
+  return new Blob([header.buffer, ...parts], {type: "audio/wav"});
+}
+
 async function generateStream(payload) {
   const started = performance.now();
-  const response = await fetch(`${baseUrl()}/stream`, {method: "POST", headers: requestHeaders(), body: JSON.stringify(payload)});
+  const abort = streamAbort;
+  const response = await fetch(`${baseUrl()}/stream`, {method: "POST", headers: requestHeaders(), body: JSON.stringify(payload), signal: abort.signal});
   if (!response.ok) throw new Error(await parseError(response));
   if (!response.body) throw new Error("This browser cannot read streaming responses.");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const parts = [];
-  const livePlayback = await openMp3Playback();
+  const pcm = payload.format === "pcm16";
+  const livePlayback = pcm ? openPcmPlayback() : await openMp3Playback();
+  let rate = 24000;   // a PCM stream's sample rate (the events' `sample_rate`; 24 kHz from servers that do not name it)
   let buffer = "";
   let chunks = 0;
+  let ttfa = null;   // seconds from sending the request to the first audio chunk (time to first audio)
   while (true) {
-    const read = await reader.read();
+    let read;
+    try { read = await reader.read(); }
+    catch (error) { if (abort.signal.aborted) break; throw error; }   // Stop: keep what has arrived
     buffer += decoder.decode(read.value || new Uint8Array(), {stream: !read.done});
     const events = buffer.split("\n\n");
     buffer = events.pop() || "";
@@ -599,24 +676,28 @@ async function generateStream(payload) {
       if (data.error) throw new Error(data.error);
       if (data.audio_b64) {
         const bytes = decodeBase64(data.audio_b64);
+        if (ttfa === null) ttfa = (performance.now() - started) / 1000;
         parts.push(bytes);
-        if (livePlayback) await livePlayback.append(bytes);
+        if (data.sample_rate) rate = data.sample_rate;
+        if (livePlayback) await livePlayback.append(bytes, rate);
         chunks += 1;
         setStatus("", `Receiving audio chunk ${chunks}…`);
-        byId("result-meta").textContent = `Playing MP3 stream · received ${chunks} chunk${chunks === 1 ? "" : "s"}`;
+        byId("result-meta").textContent = `Playing ${pcm ? "PCM" : "MP3"} stream · received ${chunks} chunk${chunks === 1 ? "" : "s"}`;
       }
     }
     if (read.done) break;
   }
-  if (!parts.length) throw new Error("The stream ended without audio.");
+  const stopped = abort.signal.aborted;
+  if (!parts.length) throw stopped ? new DOMException("Stopped", "AbortError") : new Error("The stream ended without audio.");
   if (livePlayback) livePlayback.close();
-  return {blob: new Blob(parts, {type: "audio/mpeg"}), mime: "audio/mpeg", elapsed: (performance.now() - started) / 1000, chunks, livePlayback: Boolean(livePlayback)};
+  if (pcm) return {blob: pcmToWav(parts, rate), mime: `audio/pcm (${rate / 1000} kHz, saved as WAV)`, elapsed: (performance.now() - started) / 1000, chunks, ttfa, livePlayback: Boolean(livePlayback), pcm: true, stopped};
+  return {blob: new Blob(parts, {type: "audio/mpeg"}), mime: "audio/mpeg", elapsed: (performance.now() - started) / 1000, chunks, ttfa, livePlayback: Boolean(livePlayback), stopped};
 }
 
 function showResult(output, extension) {
   if (resultUrl) URL.revokeObjectURL(resultUrl);
   resultUrl = URL.createObjectURL(output.blob);
-  if (!output.livePlayback) {
+  if (!output.livePlayback || output.pcm) {
     if (playbackUrl) URL.revokeObjectURL(playbackUrl);
     playbackUrl = null;
     player.src = resultUrl;
@@ -624,13 +705,14 @@ function showResult(output, extension) {
   download.href = resultUrl;
   download.download = `tontaube-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`;
   download.hidden = false;
-  byId("result-meta").textContent = `${output.mime} · ${(output.blob.size / 1024).toFixed(1)} KiB · generated in ${output.elapsed.toFixed(1)} s${output.chunks ? ` · ${output.chunks} streamed chunks` : ""}`;
+  byId("result-meta").textContent = `${output.mime} · ${(output.blob.size / 1024).toFixed(1)} KiB · generated in ${output.elapsed.toFixed(1)} s${output.ttfa != null ? ` · latency ${Math.round(output.ttfa * 1000)} ms` : ""}${output.chunks ? ` · ${output.chunks} streamed chunks` : ""}${serverDevice ? ` · ${serverDevice}` : ""}`;
   result.hidden = false;
   result.scrollIntoView({behavior: "smooth", block: "nearest"});
-  player.play().catch(() => {});
+  if (!output.livePlayback && !output.stopped) player.play().catch(() => {});
 }
 
 async function checkServer({refresh = true} = {}) {
+  if (refresh) serverModel = "";   // named again by the controls loaded below
   setConnection("", "Checking…");
   try {
     const response = await fetch(`${baseUrl()}/readyz`, {headers: apiKeyHeaders()});
@@ -702,10 +784,14 @@ async function refreshVoices(quiet = false) {
 
 function syncTransportState() {
   const streaming = document.querySelector('input[name="transport"]:checked').value === "stream";
-  byId("format").disabled = streaming;
+  const format = byId("format");
+  for (const option of format.options) {
+    option.disabled = streaming ? !["pcm16", "mp3"].includes(option.value) : option.value === "pcm16";
+  }
+  if (streaming && !["pcm16", "mp3"].includes(format.value)) format.value = "pcm16";
+  if (!streaming && format.value === "pcm16") format.value = "wav";
   byId("vllm-priority").disabled = streaming || !supported("vllm_priority");
   byId("streaming-initial-seconds").disabled = !streaming || !supported("streaming_initial_seconds");
-  if (streaming) byId("format").value = "mp3";
 }
 
 function showVoiceFile() {
@@ -727,16 +813,28 @@ form.addEventListener("submit", async (event) => {
   if (!form.reportValidity()) return;
   const streaming = document.querySelector('input[name="transport"]:checked').value === "stream";
   setLoading(true);
-  setStatus("", streaming ? "Starting MP3 stream…" : "Generating speech…");
+  setStatus("", streaming ? "Starting stream…" : "Generating speech…");
+  if (stopLivePcm) stopLivePcm();   // one stream at a time
+  player.pause();
+  streamAbort = streaming ? new AbortController() : null;
+  syncStop();
   try {
     const payload = await buildPayload(streaming);
     const output = streaming ? await generateStream(payload) : await generateComplete(payload);
-    showResult(output, streaming ? "mp3" : payload.format);
-    setStatus("ready", "Generation complete");
+    showResult(output, streaming ? (payload.format === "pcm16" ? "wav" : "mp3") : payload.format);
+    setStatus("ready", output.stopped ? "Stopped" : "Generation complete");
     setConnection("connected", "Server ready");
-  } catch (error) { setStatus("error", error.message || "Generation failed"); }
-  finally { setLoading(false); }
+  } catch (error) { setStatus(...(error.name === "AbortError" ? ["", "Stopped"] : ["error", error.message || "Generation failed"])); }
+  finally { streamAbort = null; syncStop(); setLoading(false); }
 });
+// Stop: the request in flight, the PCM stream still playing, and the player bar (the MP3 stream plays through it).
+byId("stop").addEventListener("click", () => {
+  if (streamAbort) streamAbort.abort();
+  if (stopLivePcm) stopLivePcm();
+  player.pause();
+});
+// Playing the saved file takes over from a PCM stream that is still sounding.
+player.addEventListener("play", () => { if (stopLivePcm) stopLivePcm(); });
 
 byId("check-server").addEventListener("click", () => checkServer());
 byId("server-url").addEventListener("input", () => { syncApiDocsLink(); scheduleControlsRefresh(); });

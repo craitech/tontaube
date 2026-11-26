@@ -299,6 +299,19 @@ def test_inputs_of_fields_the_server_does_not_read_are_disabled_and_not_sent():
     """GET /controls of a TontaubeV1.1 Flash server lists the request fields it reads (`fields`)."""
     script = _ui_text("app.js")
     assert "setServerFields(body.fields, body.model);" in script
+    assert "`${label} · ${serverModel}`" in script                    # the model's name next to "Server ready"
+
+
+def test_stream_playback_reads_the_rate_and_can_be_stopped():
+    """The PCM stream plays at the rate its events name, one stream at a time, and Stop ends request and sound."""
+    script, page = _ui_text("app.js"), _ui_text("index.html")
+    assert "if (data.sample_rate) rate = data.sample_rate;" in script
+    assert "if (!ctx) ctx = new Ctx({sampleRate: rate});" in script
+    assert "pcmToWav(parts, rate)" in script
+    assert '<button id="stop" class="secondary" type="button" hidden>Stop</button>' in page
+    assert "signal: abort.signal" in script                             # Stop aborts the request in flight
+    assert 'player.addEventListener("play", () => { if (stopLivePcm) stopLivePcm(); });' in script
+    assert "if (stopLivePcm) stopLivePcm();   // one stream at a time" in script
     assert "if (!supported(field)) delete payload[field];" in script
     assert "if (supported(\"voice_audio_b64\")) {" in script          # no voice needed for a one-voice model
     page = _ui_text("index.html")

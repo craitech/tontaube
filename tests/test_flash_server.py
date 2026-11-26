@@ -358,7 +358,7 @@ async def test_predict_at_48_khz(monkeypatch, flash_engine):
 
 @pytest.mark.asyncio
 async def test_sse_writer_uses_the_engine_rate(monkeypatch, flash_engine):
-    response = await _post(monkeypatch, flash_engine(FakeFlash48(frames=3)), "/stream", {"text": "Hi."})
+    response = await _post(monkeypatch, flash_engine(FakeFlash48(frames=3)), "/stream", {"text": "Hi.", "format": "mp3"})
     assert response.status_code == 200 and _Writer.rate == 48000
 
 
@@ -396,7 +396,7 @@ async def test_empty_speech_is_a_422(monkeypatch, flash_engine):
 @pytest.mark.asyncio
 async def test_sse_stream_sends_the_engine_audio_in_order(monkeypatch, flash_engine):
     fake = FakeFlash(frames=20, redraws={5, 12, 19})
-    response = await _post(monkeypatch, flash_engine(fake), "/stream", {"text": "Hi.", "seed": 4, "temperature": 0.5})
+    response = await _post(monkeypatch, flash_engine(fake), "/stream", {"text": "Hi.", "seed": 4, "temperature": 0.5, "format": "mp3"})
     assert response.status_code == 200
     events = [json.loads(line[6:]) for line in response.text.split("\n\n") if line.startswith("data: ")]
     assert events[-1] == {"done": True}

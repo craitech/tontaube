@@ -45,12 +45,36 @@ if not a.text and not a.lines:
     ap.error("give a TEXT or --lines FILE")
 
 
+CU126_HINT = ("for the GPU, install the CUDA 12.6 PyTorch build (README.md, \"GPUs the default PyTorch build does "
+              "not support\")")
+
+
+def gpu_unsupported():
+    """The installed PyTorch build has no kernels for the GPU (e.g. the default CUDA 12.8 wheels on a GTX 10 series card):
+    its name, else None. The same rule as `tontaube serve` (app/torch_variant.py)."""
+    try:
+        import torch
+        from app.torch_variant import build_supports
+        cap = torch.cuda.get_device_capability(0)
+        if build_supports(cap, torch.cuda.get_arch_list()):
+            return None
+        return f"{torch.cuda.get_device_name(0)} (compute capability {cap[0]}.{cap[1]})"
+    except Exception:                      # never block a run because of the check itself
+        return None
+
+
 def has_gpu():
     try:
         import torch
-        return torch.cuda.is_available()
+        if not torch.cuda.is_available():
+            return False
     except ImportError:
         return False
+    bad = gpu_unsupported()
+    if bad:
+        print(f"{bad} is not supported by this PyTorch build: using the CPU; {CU126_HINT}.", file=sys.stderr)
+        return False
+    return True
 
 
 def save_wav(path, x, sr):
@@ -62,6 +86,8 @@ def save_wav(path, x, sr):
 
 
 device = a.device or ("gpu" if has_gpu() else "cpu")
+if a.device == "gpu" and gpu_unsupported():
+    sys.exit(f"{gpu_unsupported()} is not supported by this PyTorch build; use --device cpu, or {CU126_HINT}.")
 common = dict(solver=a.solver, passes=a.passes, temp=a.temp, redraw=not a.no_redraw, cutoff=a.cutoff, max_takes=a.max_takes,
               lead_cut=not a.no_cut, weights=a.weights)
 t0 = time.perf_counter()

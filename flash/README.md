@@ -154,7 +154,7 @@ curl --silent http://127.0.0.1:8080/predict \
 | Route | Returns |
 |---|---|
 | `POST /predict` | the whole utterance as WAV, MP3 or Opus |
-| `POST /stream` | MP3 chunks as server-sent events |
+| `POST /stream` | audio chunks as server-sent events: raw PCM16 by default, `"format": "mp3"` or `"opus"` selectable |
 | `WS /ws/stream` | Opus frames of 20 ms |
 | `POST /v1/audio/speech` | OpenAI's text-to-speech API (see [OpenAI-compatible API](../README.md#openai-compatible-api)) |
 

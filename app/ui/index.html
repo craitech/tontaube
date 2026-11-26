@@ -92,10 +92,10 @@
             <div class="section-heading compact"><div><span class="step">03</span><h2 id="output-title">Output</h2></div></div>
             <div class="segmented" role="radiogroup" aria-label="Response mode">
               <label><input type="radio" name="transport" value="batch" checked><span>Complete file</span></label>
-              <label><input type="radio" name="transport" value="stream"><span>MP3 stream</span></label>
+              <label><input type="radio" name="transport" value="stream"><span>Stream</span></label>
             </div>
             <div class="field-grid two compact-fields">
-              <label>Format<select id="format"><option value="wav">WAV</option><option value="mp3">MP3</option><option value="opus">Opus</option></select></label>
+              <label>Format<select id="format"><option value="pcm16">PCM (raw)</option><option value="wav">WAV</option><option value="mp3">MP3</option><option value="opus">Opus</option></select></label>
               <label>Bitrate<select id="bitrate"><option value="32k">32 kbps</option><option value="64k" selected>64 kbps</option><option value="96k">96 kbps</option><option value="128k">128 kbps</option></select></label>
             </div>
           </section>
@@ -145,7 +145,10 @@
 
         <section class="action-row">
           <div id="status" class="request-status" role="status" aria-live="polite"><span class="status-dot ready"></span><span>Ready to generate</span></div>
-          <button id="generate" class="primary" type="submit"><span class="button-label">Generate speech</span><span class="spinner"></span></button>
+          <div class="action-buttons">
+            <button id="stop" class="secondary" type="button" hidden>Stop</button>
+            <button id="generate" class="primary" type="submit"><span class="button-label">Generate speech</span><span class="spinner"></span></button>
+          </div>
         </section>
       </form>
 

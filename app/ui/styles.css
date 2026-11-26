@@ -133,6 +133,7 @@ input[type="range"]:focus-visible { outline: 3px solid rgba(93,80,198,.35); outl
 .developer-fields .field-grid { margin-top: 18px; }
 .code-input { min-height: 85px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .action-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 20px; }
+.action-buttons { display: flex; align-items: center; gap: 10px; }
 .request-status { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 13px; }
 .spinner { display: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; animation: spin .8s linear infinite; }
 .primary.is-loading .spinner { display: inline-block; }

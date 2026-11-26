@@ -115,6 +115,13 @@ build_system_prompt(DEFAULT_LANGUAGE, DEFAULT_TAG)
 # Release name of the model family; voice_tokens are tied to its DualCodec codebooks
 # (the same for the 4-bit and full-precision weights).
 MODEL_VERSION = "TontaubeV1.1"
+# How a request's text is verbalized (request field `verbalizer`; the one place that names the modes): the rule
+# verbalizer of Flash (numbers, dates, times, money, units, abbreviations; app/verbalize_rules.py), the model
+# verbalizer (app/verbalizer.py, ENABLE_VERBALIZATION=1, English), or none.
+VERBALIZER_RULES = "rules"
+VERBALIZER_CONTEXTUAL = "contextual"
+VERBALIZER_OFF = "off"
+VERBALIZER_MODES = (VERBALIZER_RULES, VERBALIZER_CONTEXTUAL, VERBALIZER_OFF)
 
 DUALCODEC_MODEL_TYPE = "12hz_v1"
 # The codec that made a token sequence, recorded with stored voice tokens.

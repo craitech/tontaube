@@ -47,6 +47,10 @@ from app.config import (
     MODEL_VERSION,
     N_CODEBOOKS,
     NO_SHORT_FINAL_SENTENCE,
+    VERBALIZER_CONTEXTUAL,
+    VERBALIZER_MODES,
+    VERBALIZER_OFF,
+    VERBALIZER_RULES,
     SEMANTIC_VOCAB_SIZE,
     MAX_SEMANTIC_TOKENS_PER_CHUNK,
     STREAM_AUTO_MIN_INITIAL_SECONDS,
@@ -81,6 +85,23 @@ try:
     API_VERSION = package_version("tontaube-inference")
 except PackageNotFoundError:
     API_VERSION = "1.0.0"
+
+
+def _device_label(engine) -> str:
+    """Where the loaded model runs, for clients (GET /controls `device`): "GPU (<name>)" or "CPU (<n> threads)"."""
+    from app.config import LITE_ON_CPU
+    try:
+        on_cpu = LITE_ON_CPU
+        if _flash():
+            from app import flash
+            on_cpu = flash.device() == "cpu"
+        if on_cpu:
+            threads = sum(int((getattr(e, "info", None) or {}).get("threads", 0)) for e in getattr(engine, "engines", []))
+            return f"CPU ({threads} threads)" if threads else "CPU"
+        import torch
+        return f"GPU ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else "GPU"
+    except Exception:                      # informational only
+        return "unknown"
 
 
 def _flash() -> bool:
@@ -266,8 +287,23 @@ class _InstancesRequest(BaseModel):
         return value
 
 
+def _verbalizer_name(value: str | None) -> str | None:
+    """A request's `verbalizer`, lower-cased; ValueError (a 422) for a name that is none of VERBALIZER_MODES."""
+    if value is None:
+        return None
+    mode = value.strip().lower()
+    if mode not in VERBALIZER_MODES:
+        raise ValueError(f"unknown verbalizer {value!r}; expected one of {', '.join(VERBALIZER_MODES)}")
+    return mode
+
+
 class TTSRequest(_InstancesRequest):
     text: str | list[str]
+
+    @field_validator('verbalizer')
+    @classmethod
+    def known_verbalizer(cls, value: str | None) -> str | None:
+        return _verbalizer_name(value)
 
     @field_validator('text')
     @classmethod
@@ -370,7 +406,23 @@ class TTSRequest(_InstancesRequest):
     language: str = DEFAULT_LANGUAGE
     tag: Literal["audiobook", "conversational", "agentic"] = DEFAULT_TAG
     use_system_tag: bool = True
-    use_verbalization: bool = False
+    use_verbalization: bool = Field(
+        default=False,
+        description=(
+            f"Legacy form of `verbalizer`: true is {VERBALIZER_CONTEXTUAL!r} on TontaubeV1.1 and "
+            f"{VERBALIZER_RULES!r} on Flash, false is {VERBALIZER_OFF!r}. Sent together with `verbalizer` they "
+            "must agree (422 otherwise)."
+        ),
+    )
+    verbalizer: str | None = Field(
+        default=None,
+        description=(
+            f"How the text is verbalized: {VERBALIZER_RULES!r} (Flash's rule verbalizer: numbers, dates, times, "
+            f"money, units, abbreviations; English), {VERBALIZER_CONTEXTUAL!r} (the model verbalizer, English; the "
+            f"server needs ENABLE_VERBALIZATION=1) or {VERBALIZER_OFF!r}. Omitted: {VERBALIZER_OFF!r} on "
+            f"TontaubeV1.1, {VERBALIZER_RULES!r} on Flash. Unsupported combinations are refused with 422."
+        ),
+    )
     trim_silence_padding_ms: int | None = Field(
         default=250,
         ge=0,
@@ -398,10 +450,14 @@ class TTSRequest(_InstancesRequest):
             "the model read against its CB0 codes."
         ),
     )
-    format: Literal["wav", "mp3", "opus"] = "wav"
+    format: Literal["wav", "mp3", "opus", "pcm16"] = "wav"
     bitrate: Literal["32k", "64k", "96k", "128k"] = Field(
         default="64k",
-        description="Audio bitrate for encoded MP3 or Opus output, including streaming.",
+        description=(
+            "Audio bitrate for encoded MP3 or Opus output, including streaming. "
+            "`format: \"pcm16\"` (`POST /stream` only: raw 16-bit little-endian mono PCM at 24 kHz, "
+            "no codec and so no codec delay; the default of `/stream`) ignores it."
+        ),
     )
     priority: Literal["low", "high"] = Field(
         default="low",
@@ -624,18 +680,49 @@ def _error_body(message: str, code: str | None = None) -> dict:
     return TTSErrorResponse(error=str(message), code=code).model_dump(exclude_none=True)
 
 
-def _require_verbalizer(req: TTSRequest, engine) -> None:
-    if not req.use_verbalization:
-        return
+def _verbalizer_mode(req: TTSRequest, engine) -> str:
+    """The verbalization mode of a request (VERBALIZER_RULES, VERBALIZER_CONTEXTUAL or VERBALIZER_OFF) from
+    `verbalizer` and the legacy `use_verbalization`; raises TTSRequestOptionError for a contradiction or for a mode
+    this server or language cannot do. Defaults: off on TontaubeV1.1, rules on Flash."""
+    flash = _flash()
+    legacy = req.use_verbalization if "use_verbalization" in req.model_fields_set else None
+    legacy_mode = (None if legacy is None else VERBALIZER_OFF if not legacy
+                   else VERBALIZER_RULES if flash else VERBALIZER_CONTEXTUAL)
+    named = req.verbalizer
+    if named is not None and legacy_mode is not None and named != legacy_mode:
+        raise TTSRequestOptionError(
+            f"verbalizer={named!r} contradicts use_verbalization={str(legacy).lower()}, which means "
+            f"{legacy_mode!r} on this server; send one of the two", code="verbalizer_conflict",
+        )
+    mode = named or legacy_mode or (VERBALIZER_RULES if flash else VERBALIZER_OFF)
+    if mode == VERBALIZER_OFF:
+        return mode
+    asked = named is not None or legacy is True
+    label = f"verbalizer={mode!r}" if named is not None else "use_verbalization=true"
     if req.language != "english":
+        if not asked:
+            return VERBALIZER_OFF     # Flash's default on a request it refuses for its language anyway
+        raise TTSRequestOptionError(f"{label} is supported only for English requests")
+    if mode == VERBALIZER_CONTEXTUAL and (engine is None or getattr(engine, "verbalizer", None) is None):
         raise TTSRequestOptionError(
-            "use_verbalization=true is supported only for English requests"
+            f"{label} requires a loaded verbalizer; start the server with ENABLE_VERBALIZATION=1",
+            code="verbalizer_unavailable",
         )
-    if engine is None or engine.verbalizer is None:
-        raise TTSRequestOptionError(
-            "use_verbalization=true requires a loaded verbalizer; start the "
-            "server with ENABLE_VERBALIZATION=1"
-        )
+    if mode == VERBALIZER_RULES and not flash:
+        from app import verbalize_rules
+
+        try:
+            verbalize_rules.front_end()
+        except Exception as exc:  # noqa: BLE001
+            raise TTSRequestOptionError(
+                f"{label} is not available on this server: {exc}", code="verbalizer_unavailable",
+            ) from exc
+    return mode
+
+
+def _require_verbalizer(req: TTSRequest, engine) -> str:
+    """The request's verbalization mode (_verbalizer_mode), checked."""
+    return _verbalizer_mode(req, engine)
 
 
 def _require_timestamps(req: TTSRequest, engine) -> None:
@@ -653,7 +740,7 @@ def _require_timestamps(req: TTSRequest, engine) -> None:
 # token and sampling controls of TontaubeV1.1).
 FLASH_FIELDS = frozenset({
     "text", "temperature", "seed", "format", "bitrate", "priority", "trim_silence_padding_ms",
-    "use_verbalization", "language",
+    "use_verbalization", "verbalizer", "language",
 })
 
 
@@ -672,8 +759,9 @@ def _flash_option_error(req: TTSRequest) -> str | None:
 
 def _flash_kwargs(req: TTSRequest) -> dict:
     """FlashEngine.generate / generate_streaming arguments. Flash reads the raw text with its own rule verbalizer
-    and chunker (on unless the request sets use_verbalization=false), not TontaubeV1.1's text preparation."""
-    verbalize = req.use_verbalization if "use_verbalization" in req.model_fields_set else True
+    and chunker (on unless the request sets verbalizer to off or use_verbalization to false), not TontaubeV1.1's text
+    preparation."""
+    verbalize = _verbalizer_mode(req, None) == VERBALIZER_RULES
     return {"seed": req.seed, "temperature": req.temperature, "verbalize": verbalize, "priority": req.priority}
 
 
@@ -839,12 +927,17 @@ async def _synthesize(req: TTSRequest) -> dict:
     engine = await _get_engine()
     if _flash():
         return await _synthesize_flash(req, engine)
-    _require_verbalizer(req, engine)
+    mode = _require_verbalizer(req, engine)
     _require_vibevoice(req, engine)
     _require_timestamps(req, engine)
     raw = _prepare_raw_text(req.text)
     segment_controls = req.segment_controls
-    if req.use_verbalization:
+    if mode == VERBALIZER_RULES:
+        from app import verbalize_rules
+
+        raw = [verbalize_rules.verbalize(segment) for segment in raw] if isinstance(raw, list) \
+            else verbalize_rules.verbalize(raw)
+    elif mode == VERBALIZER_CONTEXTUAL:
         context = _continuation_context(req, engine)   # only the first segment continues the prefix
         if isinstance(raw, str) and context is None:
             # One text without a prefix: the verbalizer reads it whole and cuts it at paragraphs itself,
@@ -987,6 +1080,15 @@ class OpenAISpeechRequest(BaseModel):
     speed: float | None = None
     instructions: str | None = None
     stream_format: str | None = None
+    verbalizer: str | None = Field(
+        default=None,
+        description=f"Tontaube extension: {', '.join(VERBALIZER_MODES)} (see POST /predict); the model's default if omitted.",
+    )
+
+    @field_validator("verbalizer")
+    @classmethod
+    def known_verbalizer(cls, value: str | None) -> str | None:
+        return _verbalizer_name(value)
 
     @field_validator("input")
     @classmethod
@@ -1036,16 +1138,41 @@ def _float_samples(audio) -> np.ndarray:
     return audio.squeeze().cpu().float().numpy().reshape(-1)
 
 
-class _PcmWriter:
-    """OpenAI's pcm: 16-bit little-endian mono at 24 kHz. A 48 kHz engine's audio goes through a Kaiser-windowed
-    sinc low-pass (11 kHz, about 86 dB stopband from 12 kHz) and keeps every second sample."""
+class _OpusFramedWriter:
+    """/stream with format "opus": the framed Opus of /ws/stream (app/opus_stream.py OpusStreamEncoder: a frame count
+    and each 20 ms frame with its length, little-endian uint16) in each event's `audio_b64`."""
 
-    def __init__(self, sample_rate: int):
+    def __init__(self, sample_rate: int, bitrate: int):
+        from app.opus_stream import OpusStreamEncoder
+
+        self._encoder = OpusStreamEncoder(sample_rate, bitrate=bitrate)
+
+    def write_chunk(self, audio) -> bytes:
+        return self._encoder.encode(audio)
+
+    def close(self) -> bytes:
+        return self._encoder.flush()
+
+
+STREAM_FORMATS = ("pcm16", "mp3", "opus")
+
+
+def _stream_format(req: TTSRequest) -> str:
+    """The output format of /stream: pcm16 unless the request names one (mp3, opus; `wav` is not a stream format)."""
+    return req.format if "format" in req.model_fields_set else "pcm16"
+
+
+class _PcmWriter:
+    """16-bit little-endian mono PCM at `rate`: the engine's own (/stream, a plain copy) or OpenAI's 24 kHz, for
+    which a 48 kHz engine's audio goes through a Kaiser-windowed sinc low-pass (11 kHz, about 86 dB stopband from
+    12 kHz) and keeps every second sample."""
+
+    def __init__(self, sample_rate: int, rate: int = OPENAI_PCM_RATE):
         from app.stream_writers import pcm16
 
-        if sample_rate % OPENAI_PCM_RATE:
-            raise ValueError(f"cannot make 24 kHz pcm from {sample_rate} Hz")
-        self._pcm16, self._step, self._in, self._out = pcm16, sample_rate // OPENAI_PCM_RATE, 0, 0
+        if sample_rate % rate:
+            raise ValueError(f"cannot make {rate} Hz pcm from {sample_rate} Hz")
+        self._pcm16, self._step, self._in, self._out = pcm16, sample_rate // rate, 0, 0
         n = 80 * self._step + 1
         t = np.arange(n) - n // 2
         cutoff = 11000 / sample_rate
@@ -1323,10 +1450,12 @@ def create_app():
         if not _engine_ready.is_set():
             return JSONResponse(content={"error": "Model still loading"}, status_code=503)
         if _flash():
-            return {"controls": [], "model": "TontaubeV1.1 Flash", "fields": sorted(FLASH_FIELDS - {"language"})}
+            engine = await _get_engine()
+            return {"controls": [], "model": "TontaubeV1.1 Flash", "fields": sorted(FLASH_FIELDS - {"language"}),
+                    "device": _device_label(engine)}
         engine = await _get_engine()
         catalog = engine.controls.catalog() if engine.controls is not None else []
-        return {"controls": catalog}
+        return {"controls": catalog, "device": _device_label(engine)}
 
     @app.get("/readyz")
     async def readyz():
@@ -1361,16 +1490,25 @@ def create_app():
         of all-upfront, overlapping verbalization with audio generation.
         Returns None if no verbalization is needed (segments already sanitized).
         """
-        _require_verbalizer(req, engine)
-        if req.use_verbalization:
+        mode = _require_verbalizer(req, engine)
+        if mode == VERBALIZER_CONTEXTUAL:
             # generate_streaming preprocesses segments[0] first; only it continues the prefix.
             pending_context = [_continuation_context(req, engine)]
 
             async def preprocess(text: str) -> str:
                 context, pending_context[0] = pending_context[0], None
-                text = await _verbalize_segment(engine, text, context)
-                return sanitize_text_for_tts(text)
+                spoken = await _verbalize_segment(engine, text, context)
+                logger.debug("verbalizer %s: %r -> %r", mode, text, spoken)
+                return sanitize_text_for_tts(spoken)
             return preprocess
+        if mode == VERBALIZER_RULES:
+            from app import verbalize_rules
+
+            async def preprocess_rules(text: str) -> str:
+                spoken = verbalize_rules.verbalize(text)
+                logger.debug("verbalizer %s: %r -> %r", mode, text, spoken)
+                return sanitize_text_for_tts(spoken)
+            return preprocess_rules
         return None
 
     def _prepare_streaming_request(req: TTSRequest, engine):
@@ -1437,6 +1575,8 @@ def create_app():
     async def predict(req: TTSRequest):
         if not _engine_ready.is_set():
             return JSONResponse(content={"error": "Model still loading"}, status_code=503)
+        if req.format == "pcm16":
+            return JSONResponse(content=_error_body('format "pcm16" is for POST /stream only'), status_code=422)
         async with _request_slots:
             result = await synthesize(req)
         return JSONResponse(content=result)
@@ -1475,14 +1615,17 @@ def create_app():
 
     # --- Streaming routes ---
     if _enable_streaming:
-        async def _audio_sse_generator(pieces, writer, label="STREAM", priority_high: bool = False):
+        async def _audio_sse_generator(pieces, writer, label="STREAM", priority_high: bool = False,
+                                       sample_rate: int | None = None):
             """Shared SSE audio streaming generator over the engine's audio pieces.
 
-            Yields SSE `data:` lines with base64-encoded audio chunks. When
+            Yields SSE `data:` lines with base64-encoded audio chunks, each with
+            `sample_rate` when one is given (raw PCM, which does not carry it). When
             `priority_high` is true, generation runs inside the priority gate's
             HIGH scope so low-priority requests park between vLLM calls.
             """
             gate_ctx = get_gate().high() if priority_high else None
+            rate = {} if sample_rate is None else {"sample_rate": sample_rate}
             async with _request_slots:
                 if gate_ctx is not None:
                     await gate_ctx.__aenter__()
@@ -1495,7 +1638,7 @@ def create_app():
                             encoded_bytes = writer.write_chunk(audio_chunk)
                             t1 = time.monotonic()
                             audio_b64 = base64.b64encode(encoded_bytes).decode('ascii')
-                            event = json.dumps({"index": chunk_idx, "audio_b64": audio_b64, "done": False})
+                            event = json.dumps({"index": chunk_idx, "audio_b64": audio_b64, **rate, "done": False})
                             t2 = time.monotonic()
                             if chunk_idx == 0:
                                 logger.debug(
@@ -1512,7 +1655,7 @@ def create_app():
                         final_bytes = writer.close()
                         if final_bytes:
                             audio_b64 = base64.b64encode(final_bytes).decode('ascii')
-                            yield f"data: {json.dumps({'index': chunk_idx, 'audio_b64': audio_b64, 'done': False})}\n\n"
+                            yield f"data: {json.dumps({'index': chunk_idx, 'audio_b64': audio_b64, **rate, 'done': False})}\n\n"
                         yield f"data: {json.dumps({'done': True})}\n\n"
                     except _asyncio.CancelledError:
                         logger.info(
@@ -1532,10 +1675,22 @@ def create_app():
                         await gate_ctx.__aexit__(None, None, None)
 
         async def _stream_response(req: TTSRequest):
-            """Build an MP3 SSE response, honoring bitrate and request priority."""
-            option_error = _stream_option_error(req, "mp3")
+            """Build an SSE response (raw PCM16 by default; format "mp3" or "opus"), honoring bitrate and priority."""
+            transport = _stream_format(req)
+            if transport not in STREAM_FORMATS:
+                return JSONResponse(content=_error_body(
+                    f"format {req.format!r} is not a stream format; POST /stream outputs pcm16 (default), mp3 or opus"),
+                    status_code=422)
+            option_error = _stream_option_error(req, transport)
             if option_error:
                 return JSONResponse(content=_error_body(option_error), status_code=422)
+            if transport == "opus":
+                try:  # opuslib needs the Opus library (libopus), which Windows and macOS do not have by default
+                    from app.opus_stream import OpusStreamEncoder  # noqa: F401
+                except Exception as exc:  # noqa: BLE001
+                    return JSONResponse(content=_error_body(
+                        f"format 'opus' needs the Opus library (libopus), which this server does not have ({exc}); "
+                        "use pcm16 or mp3", "opus_unavailable"), status_code=422)
             engine = await _get_engine()
             if not engine.can_stream:
                 return JSONResponse(
@@ -1545,13 +1700,18 @@ def create_app():
             text, gen_kwargs = _stream_inputs(req, engine)
             # TontaubeV1.1 starts generating on the first read; Flash takes the request here (or refuses: 503).
             pieces = engine.generate_streaming(text=text, **gen_kwargs)
-            writer = Mp3StreamWriter(
-                getattr(engine, "sample_rate", DUALCODEC_SAMPLE_RATE),
-                bitrate=_bitrate_number(req.bitrate, bits_per_second=False),
-            )
+            sample_rate = getattr(engine, "sample_rate", DUALCODEC_SAMPLE_RATE)
+            if transport == "pcm16":
+                # The engine's own rate (24 kHz from TontaubeV1.1, 48 kHz from Flash by default), named in every event.
+                writer = _PcmWriter(sample_rate, sample_rate)
+            elif transport == "opus":
+                writer = _OpusFramedWriter(sample_rate, bitrate=_bitrate_number(req.bitrate, bits_per_second=True))
+            else:
+                writer = Mp3StreamWriter(sample_rate, bitrate=_bitrate_number(req.bitrate, bits_per_second=False))
 
             return StreamingResponse(
-                _audio_sse_generator(pieces, writer, priority_high=req.priority == "high"),
+                _audio_sse_generator(pieces, writer, priority_high=req.priority == "high",
+                                     sample_rate=sample_rate if transport == "pcm16" else None),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -1562,8 +1722,12 @@ def create_app():
         @app.post(
             "/stream",
             description=(
-                "Stream MP3 chunks as server-sent events. Streaming requires "
-                "VibeVoice; bitrate and priority are honored."
+                "Stream audio chunks as server-sent events. `format`: \"pcm16\" (default) raw 16-bit little-endian "
+                "mono PCM at the engine's sample rate (in each event's sample_rate), no codec delay; \"mp3\" MP3 chunks; "
+                "\"opus\" the framed Opus of /ws/stream (a uint16 frame count, then each 20 ms frame as a uint16 "
+                "length and its bytes). Every event is {index, audio_b64, done}, the audio base64-encoded; the last "
+                "is {done: true}. Streaming requires "
+                "VibeVoice; bitrate (MP3 and Opus) and priority are honored."
             ),
         )
         async def stream_tts(req: TTSRequest):
@@ -1604,7 +1768,12 @@ def create_app():
                     })
                     await ws.close(code=1013)
                     return
-                text, gen_kwargs = _stream_inputs(req, engine)
+                try:
+                    text, gen_kwargs = _stream_inputs(req, engine)
+                except (TTSRequestOptionError, UnsupportedOption) as exc:
+                    await ws.send_json(_error_body(str(exc), getattr(exc, "code", None)))
+                    await ws.close(code=1008)
+                    return
                 try:
                     pieces = engine.generate_streaming(text=text, **gen_kwargs)
                 except (EngineBusy, UnsupportedOption) as exc:
@@ -1685,7 +1854,11 @@ def create_app():
                 return _openai_error("speech is unavailable because VibeVoice is not loaded", 503)
             voice_path = None if _flash() else _openai_voice_path(body.voice)
             try:
-                req = TTSRequest(text=body.input, **({"voice_path": voice_path} if voice_path else {}))
+                req = TTSRequest(
+                    text=body.input,
+                    **({"verbalizer": body.verbalizer} if body.verbalizer is not None else {}),
+                    **({"voice_path": voice_path} if voice_path else {}),
+                )
                 text, gen_kwargs = _stream_inputs(req, engine)
                 # The same generation as /stream: Flash's redraws are settled before audio is handed out.
                 pieces = engine.generate_streaming(text=text, **gen_kwargs)

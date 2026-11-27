@@ -156,8 +156,8 @@ class _Req:
 class BatchEngine(Engine):
     def __init__(self, variant="int4", max_batch=64, kv_rows=None, **kw):
         """As Engine (the same options; graphs always on), plus max_batch: requests generated at once; kv_rows: rows
-        of the key/value pool shared by them (default 640 per request; a request takes the rows of its longest chunk,
-        e.g. about 300 for a sentence; more wait)."""
+        of the key/value pool shared by them (default 640 per request, at least one full sequence; a request takes the
+        rows of its longest chunk, e.g. about 300 for a sentence; more wait)."""
         if not kw.get("graphs", True):
             raise ValueError("BatchEngine needs CUDA graphs")
         self.max_batch = int(max_batch)
@@ -188,12 +188,13 @@ class BatchEngine(Engine):
         src = z(base + R * self.SLOT_ROWS, H)
         src[:base].copy_(self.src[:base])
         self.src = src
-        # key/value pool in pages (the last page: the padding rows'), the pages of every slot
-        self.n_pages = -(-self.kv_rows // PAGE)
+        # key/value pool in pages (the last page: the padding rows'), the pages of every slot; at least one request's
+        # longest chunk (S rows) fits, however small max_batch is
+        self.ppr = -(-S // PAGE)
+        self.n_pages = max(-(-self.kv_rows // PAGE), self.ppr)
         rows = (self.n_pages + 1) * PAGE
         self.kp = z(self.NL, rows, self.NKV, self.HD, dtype=torch.half)
         self.vp = z(self.NL, rows, self.NKV, self.HD, dtype=torch.half)
-        self.ppr = -(-S // PAGE)
         self.table = torch.full((R, self.ppr), self.n_pages, device=dev, dtype=torch.int32)
         self.pattn = K.PagedDecodeAttention(self.NQ, self.NKV, self.HD, S, max(self.sizes), dev, PAGE)
         self.arange_s = torch.arange(S, device=dev)

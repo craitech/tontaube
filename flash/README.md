@@ -32,7 +32,7 @@ Requirements: Python 3.12 and [uv](https://docs.astral.sh/uv/); for the GPU,
 an NVIDIA GPU (the repository's environment brings PyTorch).
 
 ```bash
-git clone --branch v1.2.0 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.2.1 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run python flash/speak.py "Dr. Weber's invoice from 5/9/2025 lists 3 items." --wav out.wav
 uv run python flash/speak.py --device cpu "Dr. Weber's invoice from 5/9/2025 lists 3 items." --wav out.wav
@@ -57,7 +57,7 @@ PowerShell. Install [uv](https://docs.astral.sh/uv/) and Git, then:
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-git clone --branch v1.2.0 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.2.1 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run python flash/speak.py --device cpu "Dr. Weber's invoice from 5/9/2025 lists 3 items." --wav out.wav
 uv run tontaube serve --model flash --device cpu
@@ -80,7 +80,7 @@ command line tools (`xcode-select --install`, for Git) and
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone --branch v1.2.0 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.2.1 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run python flash/speak.py --device cpu "Dr. Weber's invoice from 5/9/2025 lists 3 items." --wav out.wav
 uv run tontaube serve --model flash --device cpu
@@ -184,8 +184,8 @@ For CPU hosting, `Dockerfile.cpu` builds a small image without CUDA, vLLM or
 the TontaubeV1.1 models:
 
 ```bash
-docker build -f Dockerfile.cpu -t tontaube-flash-cpu:1.2.0 .
-docker run --rm -p 127.0.0.1:8080:8080 -v tontaube-cache:/root/.cache tontaube-flash-cpu:1.2.0
+docker build -f Dockerfile.cpu -t tontaube-flash-cpu:1.2.1 .
+docker run --rm -p 127.0.0.1:8080:8080 -v tontaube-cache:/root/.cache tontaube-flash-cpu:1.2.1
 ```
 
 The GPU image of the main [Docker](../README.md#docker) section serves Flash

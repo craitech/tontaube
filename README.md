@@ -47,7 +47,7 @@ an x86-64 CPU, [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
 FFmpeg, and the Opus runtime. Clone the release and start the server:
 
 ```bash
-git clone --branch v1.2.0 --depth 1 https://github.com/craitech/tontaube.git
+git clone --branch v1.2.1 --depth 1 https://github.com/craitech/tontaube.git
 cd tontaube
 uv run --python 3.12 --frozen tontaube serve
 ```
@@ -197,7 +197,7 @@ in about 4 GiB of GPU memory and peaks at about 6.5 GiB. The
 [vLLM backend](#vllm-backend) needs at least 24 GiB.
 
 The application pins the Tontaube weights and upstream model revisions for
-release `v1.2.0`. For a later release, use its matching source tag; do not mix
+release `v1.2.1`. For a later release, use its matching source tag; do not mix
 model bundles and inference code from different releases. While the Tontaube
 repositories are private or gated, provide a read-only `HF_TOKEN`.
 
@@ -296,13 +296,13 @@ encapsulated in an image. Install Docker Engine and the NVIDIA Container
 Toolkit, then build and run:
 
 ```bash
-docker build -t tontaube:1.2.0 .
+docker build -t tontaube:1.2.1 .
 
 docker run --rm --gpus all --ipc=host \
   -p 127.0.0.1:8080:8080 \
   -v tontaube-hf-cache:/root/.cache/huggingface \
   -v tontaube-cache:/root/.cache/tontaube \
-  tontaube:1.2.0
+  tontaube:1.2.1
 ```
 
 The named volumes preserve downloaded models and the prepared VibeVoice
@@ -776,7 +776,7 @@ docker run --rm --gpus all --ipc=host \
   -e MODEL_PATH=/srv/models \
   -e REQUIRE_API_KEY=1 \
   -e TTS_API_KEY="replace-with-a-secret" \
-  tontaube:1.2.0
+  tontaube:1.2.1
 ```
 
 To enable the model verbalizer, set `ENABLE_VERBALIZATION=1`. It must resolve and

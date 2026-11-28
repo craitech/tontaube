@@ -3578,7 +3578,7 @@ wheels = [
 
 [[package]]
 name = "tontaube-inference"
-version = "1.2.0"
+version = "1.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "dualcodec", marker = "sys_platform == 'linux' or (extra == 'extra-18-tontaube-inference-cpu' and extra == 'extra-18-tontaube-inference-cu126') or (extra == 'extra-18-tontaube-inference-cpu' and extra == 'extra-18-tontaube-inference-default') or (extra == 'extra-18-tontaube-inference-cu126' and extra == 'extra-18-tontaube-inference-default')" },
